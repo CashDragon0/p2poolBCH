@@ -1,414 +1,149 @@
-**Ubuntu 24.04 automated installer (recommended)**
+# p2poolBCH
 
-For Ubuntu 24.04 systems, we provide an interactive installer script that sets up PyPy2, builds a
-local OpenSSL 1.1, and configures p2pool with systemd integration.
+Decentralised pooled mining for Bitcoin Cash. Miners connect over Stratum;
+p2pool builds a share chain and pays out per share, with no central server.
 
-Quick start (interactive — prompts for all settings):
-
-```bash
-sudo ./contrib/install_ubuntu_24.04_py2_pypy.sh
-```
-
-Or supply everything on the command line for unattended installs:
-
-```bash
-sudo ./contrib/install_ubuntu_24.04_py2_pypy.sh \
-  --user ubuntu --network bitcoincash \
-  --rpc-host BITCOIND_HOST --rpc-port 8332 \
-  --rpc-user RPCUSER --rpc-pass RPCPASS \
-  --address YOUR_PAYOUT_ADDRESS \
-  --yes
-```
-
-The installer:
-- Asks for all settings interactively (with sensible defaults) and shows a confirmation summary
-- Downloads and installs PyPy2 runtime and builds OpenSSL 1.1 locally
-- Installs all Python dependencies into PyPy
-- Creates `p2pool-run.sh` and a ready-to-use systemd service with real credentials baked in
-- Creates the Telegram bot Python 3 venv and writes `/etc/p2pool-bot.env` if a bot token is provided
-- Configures chrony (time sync), logrotate, and disk-space monitoring
-
-For detailed instructions, troubleshooting, and manual setup steps, see `INSTALL_UBUNTU_24.04_PY2_PYPY.md`.
-For Telegram bot setup and usage, see `TELEGRAM_BOT.md`.
+This tree runs on **Python 3.13 + Twisted 24**. It was ported from the
+original PyPy2/Twisted 18 codebase.
 
 ---
 
-**Quick start: Docker + Telegram bot (new user)**
+## Requirements
 
-Everything you need to run your own p2pool-BCH node with Telegram notifications,
-using the pre-built GHCR image — no compilation required.
+- **Python 3.9+** (developed and tested on 3.13)
+- **Twisted 21+** (tested on 24.3.0). Earlier Twisted is not supported:
+  `get_page` uses `twisted.web.client.Agent`/`readBody`, which replaced
+  `twisted.web.client.getPage` in Twisted 21.
+- A running **Bitcoin Cash Node (BCHN)** with JSON-RPC enabled
 
-**Prerequisites**
-- A running **Bitcoin Cash Node (BCHN)** with JSON-RPC enabled.  
-  In `bitcoin.conf`:
-  ```
-  server=1
-  rpcuser=YOUR_RPC_USER
-  rpcpassword=YOUR_RPC_PASS
-  rpcallowip=0.0.0.0/0    # tighten to your Docker subnet in production
-  ```
-- **Docker** installed on the host:
-  ```bash
-  sudo apt update && sudo apt install -y docker.io
-  sudo systemctl enable --now docker
-  sudo usermod -aG docker $USER
-  newgrp docker   # apply group without logging out; or log out and back in
-  ```
-- A **Telegram bot token** — message [@BotFather](https://t.me/BotFather), send `/newbot`,
-  follow the prompts, and copy the token it gives you (`123456:ABC-DEF...`).
-
-**Steps — local BCHN (single-host)**
-
-This is the simplest case: BCHN runs on the same machine as the
-container. `--network host` lets the container reach BCHN at
-`127.0.0.1:8332` with no port mapping or NAT and exposes
-stratum+web (9348) and p2pool P2P (9349) directly on the host.
-
-1. Pull the image:
-   ```bash
-   docker pull ghcr.io/frstrtr/p2poolbch:latest
-   ```
-
-2. Run it (replace the placeholder values):
-   ```bash
-   docker run -d --restart unless-stopped \
-     --network host \
-     --name p2pool-bch \
-     -e RPC_HOST=127.0.0.1 \
-     -e RPC_USER=<rpcuser> \
-     -e RPC_PASS=<rpcpassword> \
-     -e PAYOUT_ADDRESS=<your_BCH_address> \
-     -e BOT_TOKEN=<token_from_BotFather> \
-     -e P2POOL_EXTRA_ARGS="--give-author 0" \
-     -v p2pool-data:/p2pool/data \
-     ghcr.io/frstrtr/p2poolbch:latest
-   ```
-   > For bridge networking with BCHN on a remote host, replace
-   > `--network host` with `-p 9348:9348 -p 9349:9349` and set
-   > `RPC_HOST` to the BCHN machine's IP.
-
-3. Verify it started:
-   ```bash
-   docker logs -f p2pool-bch
-   ```
-   You should see `...success!` for both the RPC and P2P BCHN connections,
-   followed by `Telegram bot started [PTB / Bot API]`.
-
-4. Open Telegram, find your bot by the username you gave BotFather, and send `/start`.
-   - Tap **📝 Set mining address** and enter your BCH address.
-   - Toggle notifications on/off with the inline buttons.
-   - Point your miner at `<host_ip>:9348` (stratum).
-
-5. *(Optional)* Forward port **9349** on your router to the host for better P2P peer connectivity.
-
-**Restart cycle (pull latest + recreate container)**
-
-The same recipe with stop/rm prepended is the canonical way to upgrade
-to the latest image.  Re-uses the named volume `p2pool-data` so the
-share-chain survives the restart (otherwise reload takes ~5–15 min):
+Install the dependencies (pinned in `requirements.txt` — `Twisted>=21` is the
+floor; the port is tested against 24.3.0):
 
 ```bash
-docker stop p2pool-bch 2>/dev/null; docker rm p2pool-bch 2>/dev/null
-
-docker pull ghcr.io/frstrtr/p2poolbch:latest
-
-docker run -d --restart unless-stopped \
-  --network host \
-  --name p2pool-bch \
-  -e RPC_HOST=127.0.0.1 \
-  -e RPC_USER=<rpcuser> \
-  -e RPC_PASS=<rpcpassword> \
-  -e PAYOUT_ADDRESS=<your_BCH_address> \
-  -e BOT_TOKEN=<token_from_BotFather> \
-  -e P2POOL_EXTRA_ARGS="--give-author 0" \
-  -v p2pool-data:/p2pool/data \
-  ghcr.io/frstrtr/p2poolbch:latest
-
-docker logs --tail=30 p2pool-bch
-```
-
-**Restart with MTProto Telegram-app proxy** — when the host can't
-reach `api.telegram.org` directly but can reach a Telegram MTProto
-proxy.  Append the four `BOT_IMPL`/`MTPROTO_*`/`MTPROXY_*` lines to
-the `docker run` above; everything else is identical:
-
-```bash
-  -e BOT_IMPL=mtproto \
-  -e MTPROTO_API_ID=<numeric_id_from_my.telegram.org/apps> \
-  -e MTPROTO_API_HASH=<hex_hash_from_my.telegram.org/apps> \
-  -e MTPROXY_HOST=<your_mtproxy_host> \
-  -e MTPROXY_PORT=443 \
-  -e MTPROXY_SECRET=<long_hex_secret_from_telegram_app> \
-```
-
-See `TELEGRAM_BOT.md` for the full bot reference (broadcast channels,
-env-var list, proxy types, VPN providers, troubleshooting), and
-`telegram_bot_mtproto/` for the MTProto-native variant that supports
-MTProto Telegram-app proxies.
-
----
-
-**P2pool installation with pypy -- Windows**
-
-
-On Windows, pypy is only supported via the Windows Subsystem for Linux (WSL). P2pool on pypy on WSL is much faster than P2pool on
-CPython on native Windows. To install WSL, first follow the steps outlined here:
-
-
-https://msdn.microsoft.com/en-us/commandline/wsl/install_guide
-
-
-Once you've done that, run bash and follow the rest of the steps below.
-
-
-**P2pool installation with pypy -- Linux and Windows**
-
-
-Copy and paste the following commands into a bash shell in order to install p2pool on Windows or Linux.
-
->sudo apt-get update
-
->sudo apt-get -y install pypy pypy-dev pypy-setuptools gcc build-essential git
-
-
->wget https://bootstrap.pypa.io/ez_setup.py -O - | sudo pypy
->sudo rm setuptools-*.zip
-
-
->wget https://pypi.python.org/packages/source/z/zope.interface/zope.interface-4.1.3.tar.gz#md5=9ae3d24c0c7415deb249dd1a132f0f79
-
->tar zxf zope.interface-4.1.3.tar.gz
-
->cd zope.interface-4.1.3/
-
->sudo pypy setup.py install
-
->cd ..
-
->sudo rm -r zope.interface-4.1.3*
-
-
->wget https://pypi.python.org/packages/source/T/Twisted/Twisted-15.4.0.tar.bz2
-
->tar jxf Twisted-15.4.0.tar.bz2
-
->cd Twisted-15.4.0
-
->sudo pypy setup.py install
-
->cd ..
-
->sudo rm -r Twisted-15.4.0*
-
-
->git clone https://github.com/jtoomim/p2pool.git
-
->cd p2pool
-
-
-You'll also need to install and run your bitcoind or altcoind of choice, and edit ~/.bitcoin/bitcoin.conf (or the corresponding file for litecoin or whatever other coin you intend to mine) with your bitcoind's RPC username and password. Launch your bitcoind or altcoind, and after it has finished downloading blocks and syncing, go to your p2pool directory and run
-
-
->pypy run_p2pool.py
-
-**Docker (recommended for containerised deployments)**
-
-The included multi-stage `Dockerfile` builds a self-contained image with PyPy 2.7, a locally-compiled OpenSSL 1.1, and an optional Telegram bot venv.  All p2pool settings are passed via environment variables — no config file editing required.
-
-Build the image:
-
-```bash
-docker build -t p2pool-bch .
-```
-
-Run against a remote BCHN node:
-
-```bash
-docker run -d --restart unless-stopped \
-  -e RPC_HOST=192.168.86.110 \
-  -e RPC_USER=bitcoinrpc \
-  -e RPC_PASS=YOURPASS \
-  -e PAYOUT_ADDRESS=YOUR_BCH_ADDRESS \
-  -e NETWORK=bitcoincash \
-  -p 9348:9348 \
-  -p 9349:9349 \
-  --name p2pool-bch \
-  p2pool-bch
-```
-
-Key environment variables (`docker-entrypoint.sh`):
-
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `RPC_HOST` | ✓ | — | bitcoind hostname or IP |
-| `RPC_USER` | ✓ | — | bitcoind RPC username |
-| `RPC_PASS` | ✓ | — | bitcoind RPC password |
-| `PAYOUT_ADDRESS` | — | `dynamic` | BCH payout address; `dynamic` = use miner login name |
-| `NETWORK` | — | `bitcoincash` | p2pool network (e.g. `bitcoincash_testnet`) |
-| `WORKER_PORT` | — | `9348` | Stratum + web UI port |
-| `P2POOL_PORT` | — | `9349` | p2pool P2P network port |
-| `NODE_NAME` | — | hostname | Human-readable node label in shares |
-| `BOT_TOKEN` | — | — | Telegram bot token (or mount `/etc/p2pool-bot.env`) |
-| `P2POOL_EXTRA_ARGS` | — | — | Extra flags appended verbatim to the command line |
-
-Ports: **9348** (stratum/web UI — miners connect here), **9349** (p2pool P2P — forward from router for better peer connectivity).
-
-Smoke test:
-
-```bash
-docker run --rm p2pool-bch pypy run_p2pool.py --help
+python3 -m pip install -r requirements.txt
 ```
 
 ---
 
-**Miners dashboard (web UI)**
+## Running
 
-The web UI is served on port **9348** alongside the stratum endpoint.  Open `http://<node-ip>:9348/` in a browser.  The **Miners** tab (`miners.html`) shows a live workers table refreshed every 30 s.
+Start BCHN first (`server=1` and RPC credentials in `bitcoin.conf`), then:
 
-*Workers table columns*
+```bash
+python3 run_p2pool.py \
+  --net bitcoincash \
+  -a <your_BCH_payout_address> \
+  --bitcoind-address 127.0.0.1 \
+  --bitcoind-rpc-port 8332 \
+  BITCOIND_RPCUSER BITCOIND_RPCPASSWORD \
+  --p2pool-port 9349 \
+  -w 9348
+```
 
-| Column | Description |
-|--------|-------------|
-| Worker Name | Stratum login name (address+worker) |
-| Hashrate | Current effective hash rate (rate-monitor window, 10 min) |
-| Difficulty | Last share difficulty |
-| DOA Rate | Dead-on-arrival share rate (%) |
-| Latency | Exponential moving average of round-trip time measured by periodic `client.get_version` pings (every 5 min, first ping 1 s after auth) |
-| 24h Avg | 24-hour rolling average of all RTT samples |
-| Last Submit | Time since the most recent `mining.submit` from this worker; colour-coded green (<60 s), yellow (<1 h), red (≥1 h or never). Tooltip shows total session submit count and how many idle-reconnect nudges were sent. |
+The RPC username and password are positional (space-separated, no flag name),
+in that order. If you omit them, `run_p2pool.py` reads `rpcuser=` /
+`rpcpassword=` from `~/.bitcoin/bitcoin.conf`. Use `--help` for the full flag
+list.
+
+Networks: `--net {bitcoincash,bitcoincash_regtest}`. For testnet, add
+`--testnet` to `--net bitcoincash` (ports 19339/19338).
+
+`-W ignore::SyntaxWarning` suppresses one pre-existing upstream `is 0.0`
+warning in `work.py`; it is harmless and not a bug in this port.
+
+---
+
+## Ports
+
+| Network | P2P port | Worker / stratum + web |
+|---------|----------|-----------------------|
+| Bitcoin Cash mainnet | 9349 | 9348 |
+| BCHN testnet | 19339 | 19338 |
+| BCHN regtest (local) | 19448 | 19447 |
+
+Miners connect to the worker/stratum port; the web UI is served on the same
+port. Forward the P2P port from your router for better peer connectivity.
+
+**p2pool no longer does UPnP port-mapping.** The old `--disable-upnp` flag is
+still accepted so existing systemd units keep working, but it does nothing and
+prints a deprecation warning. Forward the ports manually.
+
+If automatic public-address detection via p2p peers picks the wrong address,
+set it explicitly with `--external-ip`.
+
+---
+
+## Miner setup
+
+p2pool communicates with miners via the Stratum protocol:
+
+- **URL:** `stratum+tcp://<node-ip-or-hostname>:9348`
+- **Worker:** your BCH address
+- **Password:** `x`
+
+Mining to Legacy (P2PKH), SegWit/MultiSig (P2SH) and Bech32 addresses are
+supported for the following coins with the specified address prefixes:
+
+|Network		|P2PKH			|P2SH		|CashAddr prefix	|
+|---------------|-----------------|-------|-------------------|
+|Bitcoin Cash	|`1...`			|`3...`	|`bitcoincash:`	|
+|BCH testnet	|`m...` / `n...`		|`2...`	|`bchtest:`		|
+|BCH regtest	| (local only)		| —	|`bchreg:`		|
+
+Bitcoin Cash uses CashAddr, not Bech32. The prefix is part of the address and
+must match the network. Regtest addresses are produced by a local node only and
+have no value on any public network.
+
+To modify the mining difficulty, append a suffix to your mining address:
+`address+4096` sets the pseudoshare difficulty to 4096, and
+`address/65536` sets the actual share difficulty to 65536 (or the p2pool
+minimum, whichever is higher). Pseudoshare difficulty only affects hashrate
+statistics; actual share difficulty affects revenue variance and efficiency.
+
+---
+
+## Web UI
+
+The web UI is served on the worker/stratum port. Open
+`http://<node-ip>:9348/` in a browser. The **Miners** tab (`miners.html`)
 
 *Ghost worker filtering* — Workers are hidden from the table when:
 - They have never submitted a share on this connection (`last_diff == 0`), or
 - Their last accepted share is older than 10 minutes and they are no longer TCP-connected.
 
-This prevents stale entries from miners that are pointed at a higher-priority backup pool.
+This prevents stale entries from miners that are pointed at a higher-priority
+backup pool.
 
-*Idle-miner reconnect nudge* — If a worker is TCP-connected but has not submitted a share for **15 minutes**, the pool automatically sends a `client.reconnect` Stratum notification.  The miner disconnects, reconnects, and re-evaluates its pool-priority list — priority 1 (this node) wins and shares resume.  If the firmware does not support `client.reconnect`, the TCP connection is dropped instead; the same reconnect cycle occurs.  A 15-minute cooldown prevents repeated nudges.  The nudge count is visible in the Last Submit column tooltip.
+*Idle-miner reconnect nudge* — If a worker is TCP-connected but has not
+submitted a share for **15 minutes**, the pool automatically sends a
+`client.reconnect` Stratum notification. The miner disconnects, reconnects,
+and re-evaluates its pool-priority list — priority 1 (this node) wins and
+shares resume. If the firmware does not support `client.reconnect`, the TCP
+connection is dropped instead; the same reconnect cycle occurs. A 15-minute
+cooldown prevents repeated nudges. The nudge count is visible in the Last
+Submit column tooltip.
 
 ---
 
-**Container networking modes**
-
-Networking is not baked into the image — it is chosen at runtime.  Pick whichever mode fits your setup:
-
-| Mode | How | Best for |
-|------|-----|----------|
-| **host** | `--network host` | Dedicated VM or bare-metal host — simplest, no NAT, no port-forwarding needed |
-| **macvlan** (bridged LAN) | `docker-compose.yml` (included) | Container gets its own LAN IP and MAC; miners reach it directly |
-| **bridge + `-p`** | `-p 9348:9348 -p 9349:9349` | Shared host, multiple containers; requires router port-forward for P2P |
-
-*Host networking* (recommended for a dedicated VM):
-```bash
-docker run -d --restart unless-stopped \
-  --network host \
-  -e RPC_HOST=192.168.86.110 \
-  -e RPC_USER=bitcoinrpc \
-  -e RPC_PASS=YOURPASS \
-  -e PAYOUT_ADDRESS=YOUR_BCH_ADDRESS \
-  --name p2pool-bch \
-  p2pool-bch
-```
-
-*Macvlan (bridged LAN)* — container appears on LAN with its own IP, no port-mapping needed:
-```bash
-# Edit docker-compose.yml first:
-#   parent: eth0          → your host's LAN interface (ip -br link)
-#   ipv4_address          → a free static LAN IP
-#   RPC_HOST              → your BCHN node's IP
-docker compose up -d
-```
-> **macvlan host↔container caveat:** the Docker host itself cannot reach a macvlan container by default.
-> Create a shim to fix this:
-> ```bash
-> ip link add macvlan-shim link eth0 type macvlan mode bridge
-> ip addr add 192.168.86.241/32 dev macvlan-shim
-> ip link set macvlan-shim up
-> ip route add 192.168.86.240/32 dev macvlan-shim
-> ```
-
-**Pre-built image from GitHub Container Registry (ghcr.io)**
-
-Every push to `master` and every `v*` release tag is automatically built and pushed to GHCR by the included GitHub Actions workflow (`.github/workflows/docker.yml`).  No local build required — just pull and run:
+## Running the tests
 
 ```bash
-# latest master build
-docker pull ghcr.io/frstrtr/p2poolbch:latest
-
-docker run -d --restart unless-stopped \
-  -e RPC_HOST=192.168.86.110 \
-  -e RPC_USER=bitcoinrpc \
-  -e RPC_PASS=YOURPASS \
-  -e PAYOUT_ADDRESS=YOUR_BCH_ADDRESS \
-  -p 9348:9348 \
-  -p 9349:9349 \
-  --name p2pool-bch \
-  ghcr.io/frstrtr/p2poolbch:latest
+python3 -m twisted.trial p2pool.test
 ```
 
-Available tags:
+The suite has 141 tests (138 pass, 3 documented skips that fail identically
+under py2). The golden-vector gate compares against a captured py2 reference:
 
-| Tag | Source |
-|-----|--------|
-| `latest` | latest `master` build |
-| `master` | same as `latest` |
-| `vX.Y.Z` | release tag (semver) |
-| `sha-<short>` | specific commit SHA |
+```bash
+python3 -m p2pool.test.golden_check
+```
 
-The workflow also runs a smoke test on every PR (build only, no push) to catch regressions before merge.
+It reports 3 known baseline mismatches (`pack.ipv6_4`, `pack.ipv6_4_rt`,
+`script.push_10`) that are pre-existing.
 
-**jtoomimnet vs mainnet**
+Or run both through the wrapper, which builds a venv and exits non-zero if
+either check fails:
 
-
-If you wish to use the original forrestv btc mainnet instead of jtoomimnet, then replace
-
-
->git clone https://github.com/jtoomim/p2pool.git
-
->cd p2pool
-
-
-above with
-
-
->git clone https://github.com/p2pool/p2pool.git
-
->cd p2pool
-
-
-Note: The BTC p2pools currently have low hashrate, which means that payouts will be infrequent, large, and unpredictable. As of Feb 2018, blocks are found on jtoomimnet on average once every 25 days, and blocks are found on mainnet on average once every 108 days. Do not mine on BTC p2pool unless you are very patient and can tolerate receiving no revenue for several months.
-
-
-**Miner setup**
-
-
-P2pool communicates with miners via the stratum protocol. For BTC, configure your miners with the following information:
-
-
->URL: stratum+tcp://(Your node's IP address or hostname):9332
-
->Worker: (Your bitcoin address)
-
->Password: x
-
-
-
-Mining to Legacy (P2PKH), SegWit/MultiSig (P2SH) and Bech32 addresses are supported for the following coins with the specified address prefixes:
-
-|Coin		|P2PKH	|P2SH	|Bech32				|
-|---------------|-------|-------|-------------------------------|
-|Bitcoin	|`1...`	|`3...`	|`bc1...`			|
-|Bitcoin Cash*	|`1...`	| (test)|`bitcoincash:q...` or `q...`	|
-|Bitcoin SV*	|`1...`	| (test)|`bitcoincash:q...` or `q...`	| 
-|Litecoin	|`L...`	|`M...`	|`ltc1...`			|
-* Bitcoin Cash and Bitcoin SV uses cashaddr instead of Bech32
-
-**Only Legacy addresses (P2PKH) are supported for coins not mentioned above. If you use an address that p2pool cannot understand, then p2pool will mine to that node's default address instead.**
-
-
-If you wish to modify the mining difficulty, you may add something like "address+4096" after your mining address to set the pseudoshare difficulty to 4096, or "address/65536" to set the actual share difficulty to 65536 or the p2pool minimum share difficulty, whichever is higher. Pseudoshares only affect hashrate statistics, whereas actual shares affect revenue variance and efficiency.
-
-
-**Firewall considerations**
-
-
-If your node is behind a firewall or behind NAT (i.e. on a private IP address), you may want to forward ports to your p2pool server. P2pool uses two ports: one for p2p communication with the p2pool network, and another for both the web UI and for stratum communication with workers. For Bitcoin, those ports are 9333 (p2p) and 9332 (stratum/web). For Litecoin, they are 9326 (p2p) and 9327 (stratum/web). For Bitcoin Cash, they are 9349 (p2p) and 9348 (stratum/web).
+```bash
+./contrib/run-tests.sh
+```
