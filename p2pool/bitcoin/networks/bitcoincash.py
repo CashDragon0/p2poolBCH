@@ -7,11 +7,15 @@ from .. import data, helper
 from p2pool.util import pack
 
 
-#P2P_PREFIX = 'f9beb4d9'.decode('hex') # disk magic and old net magic
-P2P_PREFIX = 'e3e1f3e8'.decode('hex') # new net magic
+#P2P_PREFIX = bytes.fromhex('f9beb4d9') # disk magic and old net magic
+P2P_PREFIX = bytes.fromhex('e3e1f3e8') # new net magic
 P2P_PORT = 8333
 ADDRESS_VERSION = 0
 ADDRESS_P2SH_VERSION = 5
+# All Bitcoin Cash-family networks encode addresses as CashAddr, not Bech32.
+# Address coding checks this flag rather than matching on SYMBOL, so a network
+# whose symbol differs (e.g. regtest's 'rBCH') is handled correctly.
+USES_CASHADDR = True
 HUMAN_READABLE_PART = 'bitcoincash'
 RPC_PORT = 8332
 RPC_CHECK = defer.inlineCallbacks(lambda bitcoind: defer.returnValue(

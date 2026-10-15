@@ -5,25 +5,24 @@ import gc
 import json
 import os
 import random
-import subprocess
 import sys
 import time
 import signal
 import traceback
-import urlparse
+import urllib.parse
 
-if '--iocp' in sys.argv:
-    from twisted.internet import iocpreactor
-    iocpreactor.install()
+# NOTE: the old --iocp switch (which called iocpreactor.install() before the
+# first reactor import) has been removed. On Python 3 Twisted selects epoll by
+# default, which outperforms iocpreactor, and importing the reactor at module
+# scope pinned the default reactor irreversibly.
 from twisted.internet import defer, reactor, protocol, tcp
 from twisted.web import server
 from twisted.python import log
-from nattraverso import portmapper, ipdiscover
 
-import bitcoin.p2p as bitcoin_p2p, bitcoin.data as bitcoin_data
-from bitcoin import stratum, worker_interface, helper, notifier
-from bitcoin.broadcaster import NetworkBroadcaster
-from util import fixargparse, jsonrpc, variable, deferral, math, logging, switchprotocol
+from .bitcoin import p2p as bitcoin_p2p, data as bitcoin_data
+from .bitcoin import stratum, worker_interface, helper
+from .bitcoin.broadcaster import NetworkBroadcaster
+from .util import fixargparse, jsonrpc, variable, deferral, math, logging, switchprotocol
 from . import networks, web, work
 import p2pool, p2pool.data as p2pool_data, p2pool.node as p2pool_node
 
@@ -80,22 +79,22 @@ gnode = None # for debugging via rconsole/rfoo only
 @defer.inlineCallbacks
 def main(args, net, datadir_path, merged_urls, worker_endpoint):
     try:
-        print 'p2pool (version %s)' % (p2pool.__version__,)
-        print
+        print('p2pool (version %s)' % (p2pool.__version__,))
+        print()
         
         @defer.inlineCallbacks
         def connect_p2p():
             # connect to bitcoind over bitcoin-p2p
-            print '''Testing bitcoind P2P connection to '%s:%s'...''' % (args.bitcoind_address, args.bitcoind_p2p_port)
+            print('''Testing bitcoind P2P connection to '%s:%s'...''' % (args.bitcoind_address, args.bitcoind_p2p_port))
             factory = bitcoin_p2p.ClientFactory(net.PARENT)
             reactor.connectTCP(args.bitcoind_address, args.bitcoind_p2p_port, factory)
-            def long():
-                print '''    ...taking a while. Common reasons for this include all of bitcoind's connection slots being used...'''
-            long_dc = reactor.callLater(5, long)
+            def int():
+                print('''    ...taking a while. Common reasons for this include all of bitcoind's connection slots being used...''')
+            long_dc = reactor.callLater(5, int)
             yield factory.getProtocol() # waits until handshake is successful
             if not long_dc.called: long_dc.cancel()
-            print '    ...success!'
-            print
+            print('    ...success!')
+            print()
             defer.returnValue(factory)
         
         if args.testnet: # establish p2p connection first if testnet so bitcoind can work without connections
@@ -103,8 +102,8 @@ def main(args, net, datadir_path, merged_urls, worker_endpoint):
         
         # connect to bitcoind over JSON-RPC and do initial getmemorypool
         url = '%s://%s:%i/' % ('https' if args.bitcoind_rpc_ssl else 'http', args.bitcoind_address, args.bitcoind_rpc_port)
-        print '''Testing bitcoind RPC connection to '%s' with username '%s'...''' % (url, args.bitcoind_rpc_username)
-        bitcoind = jsonrpc.HTTPProxy(url, dict(Authorization='Basic ' + base64.b64encode(args.bitcoind_rpc_username + ':' + args.bitcoind_rpc_password)), timeout=30)
+        print('''Testing bitcoind RPC connection to '%s' with username '%s'...''' % (url, args.bitcoind_rpc_username))
+        bitcoind = jsonrpc.HTTPProxy(url, dict(Authorization='Basic ' + base64.b64encode((args.bitcoind_rpc_username + ':' + args.bitcoind_rpc_password).encode('utf-8')).decode('ascii')), timeout=30)
         yield helper.check(bitcoind, net, args)
         temp_work = yield helper.getwork(bitcoind, net)
         
@@ -115,38 +114,40 @@ def main(args, net, datadir_path, merged_urls, worker_endpoint):
         yield poll_warnings()
         deferral.RobustLoopingCall(poll_warnings).start(20*60)
         
-        print '    ...success!'
-        print '    Current block hash: %x' % (temp_work['previous_block'],)
-        print '    Current block height: %i' % (temp_work['height'] - 1,)
-        print
+        print('    ...success!')
+        print('    Current block hash: %x' % (temp_work['previous_block'],))
+        print('    Current block height: %i' % (temp_work['height'] - 1,))
+        print()
         
         if not args.testnet:
             factory = yield connect_p2p()
         
-        print 'Determining payout address...'
+        print('Determining payout address...')
         pubkeys = keypool()
         if args.pubkey_hash is None and args.address != 'dynamic':
             address_path = os.path.join(datadir_path, 'cached_payout_address')
             
             if os.path.exists(address_path):
                 with open(address_path, 'rb') as f:
-                    address = f.read().strip('\r\n')
-                print '    Loaded cached address: %s...' % (address,)
+                    # py2 read str and stripped str; py3 'rb' yields bytes,
+                    # and bytes.strip(str) is TypeError
+                    address = f.read().strip(b'\r\n').decode('utf-8')
+                print('    Loaded cached address: %s...' % (address,))
             else:
                 address = None
             
             if address is not None:
                 res = yield deferral.retry('Error validating cached address:', 5)(lambda: bitcoind.rpc_validateaddress(address))()
                 if not res['isvalid'] or (hasattr(res, 'ismine') and not res['ismine']):
-                    print '    Cached address is either invalid or not controlled by local bitcoind!'
+                    print('    Cached address is either invalid or not controlled by local bitcoind!')
                     address = None
 
             if address is None:
-                print '    Getting payout address from bitcoind...'
+                print('    Getting payout address from bitcoind...')
                 address = yield deferral.retry('Error getting payout address from bitcoind:', 5)(lambda: bitcoind.rpc_getaccountaddress('p2pool'))()
 
             with open(address_path, 'wb') as f:
-                f.write(address)
+                f.write(address.encode('utf-8'))
 
             my_address = address
             print('    ...success! Payout address: %s' % my_address)
@@ -160,10 +161,10 @@ def main(args, net, datadir_path, merged_urls, worker_endpoint):
 
             pubkeys.addkey({'address': my_address})
         else:
-            print '    Entering dynamic address mode.'
+            print('    Entering dynamic address mode.')
 
             if args.numaddresses < 2:
-                print ' ERROR: Can not use fewer than 2 addresses in dynamic mode. Resetting to 2.'
+                print(' ERROR: Can not use fewer than 2 addresses in dynamic mode. Resetting to 2.')
                 args.numaddresses = 2
             for i in range(args.numaddresses):
                 address = yield deferral.retry('Error getting a dynamic address from bitcoind:', 5)(lambda: bitcoind.rpc_getnewaddress('p2pool'))()
@@ -176,20 +177,20 @@ def main(args, net, datadir_path, merged_urls, worker_endpoint):
             for i in range(len(pubkeys.keys)):
                 print('    ...payout %d: %s' % (i, pubkeys[i]['address']))
         
-        print "Loading shares..."
+        print("Loading shares...")
         shares = {}
         known_verified = set()
         def share_cb(share):
             share.time_seen = 0 # XXX
             shares[share.hash] = share
             if len(shares) % 1000 == 0 and shares:
-                print "    %i" % (len(shares),)
+                print("    %i" % (len(shares),))
         ss = p2pool_data.ShareStore(os.path.join(datadir_path, 'shares.'), net, share_cb, known_verified.add)
-        print "    ...done loading %i shares (%i verified)!" % (len(shares), len(known_verified))
-        print
+        print("    ...done loading %i shares (%i verified)!" % (len(shares), len(known_verified)))
+        print()
         
         
-        print 'Initializing work...'
+        print('Initializing work...')
         
         global gnode
         gnode = node = p2pool_node.Node(factory, bitcoind, shares.values(), known_verified, net)
@@ -198,10 +199,10 @@ def main(args, net, datadir_path, merged_urls, worker_endpoint):
         # Initialize block broadcaster for parallel propagation
         broadcaster = None
         if not args.disable_broadcaster:
-            print ''
-            print '=' * 70
-            print 'INITIALIZING MULTI-PEER BROADCASTER'
-            print '=' * 70
+            print('')
+            print('=' * 70)
+            print('INITIALIZING MULTI-PEER BROADCASTER')
+            print('=' * 70)
             try:
                 broadcaster = NetworkBroadcaster(
                     net=net.PARENT,
@@ -216,23 +217,23 @@ def main(args, net, datadir_path, merged_urls, worker_endpoint):
                 yield broadcaster.start()
                 helper.set_broadcaster(broadcaster)
                 node.broadcaster = broadcaster
-                print ''
-                print '*** BROADCASTER READY ***'
-                print '  Max peers: %d' % broadcaster.max_peers
-                print '  Min peers: %d' % broadcaster.min_peers
-                print '  Peer database: %d peers' % len(broadcaster.peer_db)
-                print '  Active connections: %d' % len(broadcaster.connections)
-                print '=' * 70
-                print ''
+                print('')
+                print('*** BROADCASTER READY ***')
+                print('  Max peers: %d' % broadcaster.max_peers)
+                print('  Min peers: %d' % broadcaster.min_peers)
+                print('  Peer database: %d peers' % len(broadcaster.peer_db))
+                print('  Active connections: %d' % len(broadcaster.connections))
+                print('=' * 70)
+                print('')
             except Exception as e:
-                print '    ...block broadcaster failed to start (continuing without it): %s' % e
+                print('    ...block broadcaster failed to start (continuing without it): %s' % e)
                 traceback.print_exc()
                 broadcaster = None
         else:
-            print ''
-            print 'Multi-peer broadcaster: DISABLED'
-            print '  (Use without --disable-broadcaster to enable multi-peer broadcasting)'
-            print ''
+            print('')
+            print('Multi-peer broadcaster: DISABLED')
+            print('  (Use without --disable-broadcaster to enable multi-peer broadcasting)')
+            print('')
         
         for share_hash in shares:
             if share_hash not in node.tracker.items:
@@ -256,11 +257,11 @@ def main(args, net, datadir_path, merged_urls, worker_endpoint):
             counts = p2pool_data.get_desired_version_counts(node.tracker, node.tracker.get_nth_parent_hash(previous_share.hash, net.CHAIN_LENGTH*9//10), net.CHAIN_LENGTH//10)
             p2pool_data.update_min_protocol_version(counts, best_share)
         
-        print '    ...success!'
-        print
+        print('    ...success!')
+        print()
         
         
-        print 'Joining p2pool network using port %i...' % (args.p2pool_port,)
+        print('Joining p2pool network using port %i...' % (args.p2pool_port,))
         
         @defer.inlineCallbacks
         def parse(host):
@@ -276,7 +277,7 @@ def main(args, net, datadir_path, merged_urls, worker_endpoint):
                 with open(os.path.join(datadir_path, 'addrs'), 'rb') as f:
                     addrs.update(dict((tuple(k), v) for k, v in json.loads(f.read())))
             except:
-                print >>sys.stderr, 'error parsing addrs'
+                print('error parsing addrs', file=sys.stderr)
         for addr_df in map(parse, net.BOOTSTRAP_ADDRS):
             try:
                 addr = yield addr_df
@@ -305,96 +306,23 @@ def main(args, net, datadir_path, merged_urls, worker_endpoint):
         
         def save_addrs():
             with open(os.path.join(datadir_path, 'addrs'), 'wb') as f:
-                f.write(json.dumps(node.p2p_node.addr_store.items()))
+                f.write(json.dumps(list(node.p2p_node.addr_store.items())).encode('utf-8'))
         deferral.RobustLoopingCall(save_addrs).start(60)
         
-        print '    ...success!'
-        print
+        print('    ...success!')
+        print()
         
-        if args.upnp:
-            @defer.inlineCallbacks
-            def upnp_thread():
-                while True:
-                    try:
-                        is_lan, lan_ip = yield ipdiscover.get_local_ip()
-                        if is_lan:
-                            pm = yield portmapper.get_port_mapper()
-                            yield pm._upnp.add_port_mapping(lan_ip, args.p2pool_port, args.p2pool_port, 'p2pool', 'TCP')
-                    except defer.TimeoutError:
-                        pass
-                    except:
-                        if p2pool.DEBUG:
-                            log.err(None, 'UPnP error:')
-                    yield deferral.sleep(random.expovariate(1/120))
-            upnp_thread()
+        # UPnP port-mapping has been removed. See the note on --disable-upnp in
+        # the argument parser: the flag is still accepted (so existing systemd
+        # units and P2POOL_EXTRA_ARGS don't break) but is now a no-op.
         
         # start listening for workers with a JSON-RPC server
         
-        print 'Listening for workers on %r port %i...' % (worker_endpoint[0], worker_endpoint[1])
+        print('Listening for workers on %r port %i...' % (worker_endpoint[0], worker_endpoint[1]))
         
         wb = work.WorkerBridge(node, my_address, args.donation_percentage,
                                merged_urls, args.worker_fee, args, pubkeys,
                                bitcoind, args.share_rate)
-        
-        if args.run_bot and not args.local_bot_url:
-            args.local_bot_url = 'http://127.0.0.1:19349'
-        
-        if args.local_bot_url:
-            import socket as _socket
-            _node_name = args.node_name or _socket.gethostname()
-            _pusher = notifier.LocalEventPusher(args.local_bot_url, _node_name, wb)
-            # Subscribe to the SEMANTIC events (refcounted), not the per-socket
-            # raw ones — multi-socket ASIC firmware fires the raw events many
-            # times per logical worker and would otherwise spam alerts.
-            wb.worker_first_connected.watch(_pusher.on_worker_connected)
-            wb.worker_last_disconnected.watch(_pusher.on_worker_disconnected)
-            wb.worker_silent.watch(_pusher.on_worker_silent)
-            wb.worker_active_again.watch(_pusher.on_worker_active_again)
-            wb.share_found.watch(_pusher.on_share_found)
-            wb.block_found.watch(_pusher.on_block_found)
-        
-        if args.run_bot:
-            _bot_env = os.environ.copy()
-            if args.bot_env_file:
-                try:
-                    with open(args.bot_env_file) as _f:
-                        for _line in _f:
-                            _line = _line.strip()
-                            if _line and not _line.startswith('#') and '=' in _line:
-                                _k, _v = _line.split('=', 1)
-                                _bot_env[_k.strip()] = _v.strip()
-                except Exception as _e:
-                    print 'Warning: could not read bot env file %s: %s' % (args.bot_env_file, _e)
-            # Choose the bot impl: --bot-impl on the CLI wins; otherwise the
-            # BOT_IMPL env var (so docker -e BOT_IMPL=mtproto works); default
-            # is the Bot-API/PTB variant.
-            _bot_impl = (args.bot_impl or _bot_env.get('BOT_IMPL', 'ptb') or 'ptb').strip().lower()
-            if _bot_impl in ('ptb', 'bot-api', 'bot_api', ''):
-                _bot_module = 'telegram_bot.bot'
-                _bot_label = 'PTB / Bot API'
-            elif _bot_impl in ('mtproto', 'tdlib', 'telethon'):
-                _bot_module = 'telegram_bot_mtproto.bot'
-                _bot_label = 'MTProto (Telethon)'
-            else:
-                print 'Warning: unknown --bot-impl %r - defaulting to PTB' % (_bot_impl,)
-                _bot_module = 'telegram_bot.bot'
-                _bot_label = 'PTB / Bot API'
-            _p2pool_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            _bot_proc = subprocess.Popen(
-                [args.bot_python, '-m', _bot_module],
-                cwd=_p2pool_root,
-                env=_bot_env,
-            )
-            print 'Telegram bot started [%s] (PID %d)' % (_bot_label, _bot_proc.pid)
-            def _stop_bot():
-                if _bot_proc.poll() is None:
-                    print 'Stopping Telegram bot (PID %d)...' % (_bot_proc.pid,)
-                    _bot_proc.terminate()
-                    try:
-                        _bot_proc.wait()
-                    except Exception:
-                        pass
-            reactor.addSystemEventTrigger('before', 'shutdown', _stop_bot)
         
         web_root = web.get_web_root(wb, datadir_path, bitcoind_getinfo_var, static_dir=args.web_static)
         caching_wb = worker_interface.CachingWorkerBridge(wb)
@@ -422,21 +350,21 @@ def main(args, net, datadir_path, merged_urls, worker_endpoint):
         with open(os.path.join(os.path.join(datadir_path, 'ready_flag')), 'wb') as f:
             pass
         
-        print '    ...success!'
-        print
+        print('    ...success!')
+        print()
         
         
         # done!
-        print 'Started successfully!'
-        print 'Go to http://127.0.0.1:%i/ to view graphs and statistics!' % (worker_endpoint[1],)
+        print('Started successfully!')
+        print('Go to http://127.0.0.1:%i/ to view graphs and statistics!' % (worker_endpoint[1],))
         if args.donation_percentage > 1.1:
-            print '''Donating %.1f%% of work towards P2Pool's development. Thanks for the tip!''' % (args.donation_percentage,)
+            print('''Donating %.1f%% of work towards P2Pool's development. Thanks for the tip!''' % (args.donation_percentage,))
         elif args.donation_percentage < .9:
-            print '''Donating %.1f%% of work towards P2Pool's development. Please donate to encourage further development of P2Pool!''' % (args.donation_percentage,)
+            print('''Donating %.1f%% of work towards P2Pool's development. Please donate to encourage further development of P2Pool!''' % (args.donation_percentage,))
         else:
-            print '''Donating %.1f%% of work towards P2Pool's development. Thank you!''' % (args.donation_percentage,)
-            print 'You can increase this amount with --give-author argument! (or decrease it, if you must)'
-        print
+            print('''Donating %.1f%% of work towards P2Pool's development. Thank you!''' % (args.donation_percentage,))
+            print('You can increase this amount with --give-author argument! (or decrease it, if you must)')
+        print()
         
         
         if hasattr(signal, 'SIGALRM'):
@@ -453,7 +381,7 @@ def main(args, net, datadir_path, merged_urls, worker_endpoint):
                 channel = net.ANNOUNCE_CHANNEL
                 def lineReceived(self, line):
                     if p2pool.DEBUG:
-                        print repr(line)
+                        print(repr(line))
                     irc.IRCClient.lineReceived(self, line)
                 def signedOn(self):
                     self.in_channel = False
@@ -493,7 +421,7 @@ def main(args, net, datadir_path, merged_urls, worker_endpoint):
                         self._remember_message(message)
                 def connectionLost(self, reason):
                     node.tracker.verified.added.unwatch(self.watch_id)
-                    print 'IRC connection lost:', reason.getErrorMessage()
+                    print('IRC connection lost:', reason.getErrorMessage())
             class IRCClientFactory(protocol.ReconnectingClientFactory):
                 protocol = IRCClient
             reactor.connectTCP("irc.freenode.net", 6667, IRCClientFactory(), bindAddress=(worker_endpoint[0], 0))
@@ -511,7 +439,7 @@ def main(args, net, datadir_path, merged_urls, worker_endpoint):
                         len(node.tracker.verified.items),
                         len(node.tracker.items),
                         len(node.p2p_node.peers),
-                        sum(1 for peer in node.p2p_node.peers.itervalues() if peer.incoming),
+                        sum(1 for peer in node.p2p_node.peers.values() if peer.incoming),
                     ) + (' FDs: %i R/%i W' % (len(reactor.getReaders()), len(reactor.getWriters())) if p2pool.DEBUG else '')
                     
                     datums, dt = wb.local_rate_monitor.get_datums_in_last()
@@ -550,15 +478,15 @@ def main(args, net, datadir_path, merged_urls, worker_endpoint):
                         )
                         
                         for warning in p2pool_data.get_warnings(node.tracker, node.best_share_var.value, net, bitcoind_getinfo_var.value, node.bitcoind_work.value):
-                            print >>sys.stderr, '#'*40
-                            print >>sys.stderr, '>>> Warning: ' + warning
-                            print >>sys.stderr, '#'*40
+                            print('#'*40, file=sys.stderr)
+                            print('>>> Warning: ' + warning, file=sys.stderr)
+                            print('#'*40, file=sys.stderr)
                         
                         if gc.garbage:
-                            print '%i pieces of uncollectable cyclic garbage! Types: %r' % (len(gc.garbage), map(type, gc.garbage))
+                            print('%i pieces of uncollectable cyclic garbage! Types: %r' % (len(gc.garbage), map(type, gc.garbage)))
                     
                     if this_str != last_str or time.time() > last_time + 15:
-                        print this_str
+                        print(this_str)
                         last_str = this_str
                         last_time = time.time()
                 except:
@@ -569,17 +497,17 @@ def main(args, net, datadir_path, merged_urls, worker_endpoint):
             try:
                 broadcaster.stop()
             except Exception as e:
-                print 'Warning: Broadcaster shutdown error: %s' % str(e)
+                print('Warning: Broadcaster shutdown error: %s' % str(e))
         reactor.stop()
         log.err(None, 'Fatal error:')
 
 def run():
     if not hasattr(tcp.Client, 'abortConnection'):
-        print "Twisted doesn't have abortConnection! Upgrade to a newer version of Twisted to avoid memory leaks!"
-        print 'Pausing for 3 seconds...'
+        print("Twisted doesn't have abortConnection! Upgrade to a newer version of Twisted to avoid memory leaks!")
+        print('Pausing for 3 seconds...')
         time.sleep(3)
     
-    realnets = dict((name, net) for name, net in networks.nets.iteritems() if '_testnet' not in name)
+    realnets = dict((name, net) for name, net in networks.nets.items() if '_testnet' not in name)
     
     parser = fixargparse.FixedArgumentParser(description='p2pool (version %s)' % (p2pool.__version__,), fromfile_prefix_chars='@')
     parser.add_argument('--version', action='version', version=p2pool.__version__)
@@ -621,7 +549,7 @@ def run():
         help='call getauxblock on this url to get work for merged mining (example: http://ncuser:ncpass@127.0.0.1:10332/)',
         type=str, action='append', default=[], dest='merged_urls')
     parser.add_argument('--merged_addr',
-        help='call createauxblock/submitauxblock on this url to get work for merged mining and use payout address (example: payout%http://ncuser:ncpass@127.0.0.1:10332/)',
+        help='call createauxblock/submitauxblock on this url to get work for merged mining and use payout address (example: payout%%http://ncuser:ncpass@127.0.0.1:10332/)',
         type=str, action='append', default=[], dest='merged_urls_addr')
     parser.add_argument('--coinbtext',
         help='append this text to the coinbase',
@@ -629,9 +557,6 @@ def run():
     parser.add_argument('--give-author', metavar='DONATION_PERCENTAGE',
         help='donate this percentage of work towards the development of p2pool (default: 0.0)',
         type=float, action='store', default=0.0, dest='donation_percentage')
-    parser.add_argument('--iocp',
-        help='use Windows IOCP API in order to avoid errors due to large number of sockets being open',
-        action='store_true', default=False, dest='iocp')
     parser.add_argument('--irc-announce',
         help='announce any blocks found on irc://irc.freenode.net/#p2pool',
         action='store_true', default=False, dest='irc_announce')
@@ -647,8 +572,15 @@ def run():
         help='connect to existing p2pool node at ADDR listening on port PORT (defaults to default p2pool P2P port) in addition to builtin addresses',
         type=str, action='append', default=[], dest='p2pool_nodes')
     parser.add_argument('--disable-upnp',
-        help='''don't attempt to use UPnP to forward p2pool's P2P port from the Internet to this computer''',
-        action='store_false', default=True, dest='upnp')
+        help='''DEPRECATED and IGNORED. UPnP port-mapping has been removed from p2pool.
+This flag is still accepted so that existing systemd units and
+P2POOL_EXTRA_ARGS containing it keep working; it does nothing.
+
+If you run p2pool behind NAT, forward the P2P port (9349 mainnet, 19339
+testnet, 19448 regtest) and the worker port (9348 / 19338 / 19447) to this
+machine manually. Use --external-ip if automatic address detection via p2p
+peers picks the wrong address.''',
+        action='store_true', default=False, dest='disable_upnp_deprecated')
     p2pool_group.add_argument('--max-conns', metavar='CONNS',
         help='maximum incoming connections (default: 40)',
         type=int, action='store', default=40, dest='p2pool_conns')
@@ -706,32 +638,13 @@ def run():
     broadcaster_group.add_argument('--broadcaster-min-peers', metavar='MIN_PEERS',
         help='minimum number of peers for block broadcaster (default: 5)',
         type=int, action='store', default=5, dest='broadcaster_min_peers')
-    
-    bot_group = parser.add_argument_group('telegram bot notifier')
-    bot_group.add_argument('--local-bot-url', metavar='URL',
-        help='POST worker/share/block events to this local URL (default: disabled)',
-        type=str, action='store', default=None, dest='local_bot_url')
-    bot_group.add_argument('--node-name', metavar='NAME',
-        help='name included in bot event payloads (default: hostname)',
-        type=str, action='store', default=None, dest='node_name')
-    bot_group.add_argument('--run-bot',
-        help='launch the Telegram bot (telegram_bot/bot.py) as a child process and keep it running alongside p2pool; also enables --local-bot-url with the default port if not set',
-        action='store_true', default=False, dest='run_bot')
-    bot_group.add_argument('--bot-env-file', metavar='PATH',
-        help='load environment variables (KEY=VALUE) from this file into the bot subprocess (e.g. /etc/p2pool-bot.env)',
-        type=str, action='store', default=None, dest='bot_env_file')
-    bot_group.add_argument('--bot-python', metavar='PYTHON',
-        help='Python 3 executable (or venv python) to use for the bot subprocess (default: python3)',
-        type=str, action='store', default='python3', dest='bot_python')
-    bot_group.add_argument('--bot-impl', metavar='IMPL',
-        help='which bot implementation to launch: "ptb" (default — Bot API '
-             'over HTTPS via python-telegram-bot, supports HTTP/SOCKS5 '
-             'proxies) or "mtproto" (Telethon over native MTProto, '
-             'additionally supports MTProto Telegram-app proxies). The '
-             'BOT_IMPL env var is honoured if this flag is omitted.',
-        type=str, action='store', default=None, dest='bot_impl')
 
     args = parser.parse_args()
+    
+    if args.disable_upnp_deprecated:
+        print('WARNING: --disable-upnp is deprecated and has no effect. UPnP port-mapping'
+              ' was removed from p2pool. Forward the P2P and worker ports manually'
+              ' if you are behind NAT (see --help for port numbers).')
     
     if args.debug:
         p2pool.DEBUG = True
@@ -761,7 +674,7 @@ def run():
                 '''rpcpassword=%x\r\n'''
                 '''\r\n'''
                 '''Keep that password secret! After creating the file, restart Bitcoin.''' % (conf_path, random.randrange(2**128)))
-        conf = open(conf_path, 'rb').read()
+        conf = open(conf_path, 'rb').read().decode('utf-8', 'replace')
         contents = {}
         for line in conf.splitlines(True):
             if '#' in line:
@@ -810,7 +723,7 @@ def run():
         try:
             _ = bitcoin_data.address_to_pubkey_hash(args.address, net.PARENT)
             args.pubkey_hash = True
-        except Exception, e:
+        except Exception as e:
             parser.error('error parsing address: ' + repr(e))
     else:
         args.pubkey_hash = None
@@ -822,12 +735,12 @@ def run():
                 parser.error('payoutaddress not specifed in merged url')
             paddr, url = url.split('%')
             print("Found payout %s for %s" % (paddr, url))
-        s = urlparse.urlsplit(url)
+        s = urllib.parse.urlsplit(url)
         if '@' not in s.netloc:
             parser.error('merged url netloc must contain an "@"')
         userpass, new_netloc = s.netloc.rsplit('@', 1)
-        return urlparse.urlunsplit(s._replace(netloc=new_netloc)), userpass, paddr
-    merged_urls = map(separate_url, args.merged_urls)
+        return urllib.parse.urlunsplit(s._replace(netloc=new_netloc)), userpass, paddr
+    merged_urls = list(map(separate_url, args.merged_urls))
     merged_urls += [separate_url(x, addr=True) for x in args.merged_urls_addr]
     
     if args.logfile is None:
@@ -839,9 +752,9 @@ def run():
     sys.stderr = log.DefaultObserver.stderr = logging.AbortPipe(logging.PrefixPipe(pipe, '> '))
     if hasattr(signal, "SIGUSR1"):
         def sigusr1(signum, frame):
-            print 'Caught SIGUSR1, closing %r...' % (args.logfile,)
+            print('Caught SIGUSR1, closing %r...' % (args.logfile,))
             logfile.reopen()
-            print '...and reopened %r after catching SIGUSR1.' % (args.logfile,)
+            print('...and reopened %r after catching SIGUSR1.' % (args.logfile,))
         signal.signal(signal.SIGUSR1, sigusr1)
     deferral.RobustLoopingCall(logfile.reopen).start(5)
     
@@ -863,13 +776,17 @@ def run():
             else:
                 text = " ".join([str(m) for m in eventDict["message"]]) + "\n"
             
-            from twisted.web import client
-            client.getPage(
-                url='http://u.forre.st/p2pool_error.cgi',
-                method='POST',
-                postdata=p2pool.__version__ + ' ' + net.NAME + '\n' + text,
-                timeout=15,
-            ).addBoth(lambda x: None)
+            # twisted.web.client.getPage was removed in Twisted 21; the
+            # Agent + readBody pair is the documented replacement.
+            # Note: postdata must be bytes, and the URL must be str.
+            from twisted.web.client import Agent, readBody
+            from twisted.web.http_headers import Headers
+            _agent = Agent(reactor)
+            _body = (p2pool.__version__ + ' ' + net.NAME + '\n' + text).encode('utf-8')
+            _req = _agent.request(
+                b'POST', b'http://u.forre.st/p2pool_error.cgi',
+                Headers({b'Content-Type': [b'text/plain']}), _body)
+            _req.addBoth(lambda x: None)
     if not args.no_bugreport:
         log.addObserver(ErrorReporter().emit)
     if args.rconsole:

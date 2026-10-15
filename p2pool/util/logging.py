@@ -10,11 +10,16 @@ class EncodeReplacerPipe(object):
         self.inner_file = inner_file
         self.softspace = 0
     def write(self, data):
-        if isinstance(data, unicode):
+        # Downstream pipes are all text (self.buf = '', split('\n')) and
+        # LogFile.reopen hands us a codecs text stream, so the invariant is
+        # str.  py2 encoded the other way (unicode -> bytes), which is why
+        # this pipe existed; under py3 we decode instead.
+        if isinstance(data, bytes):
+            enc = getattr(self.inner_file, 'encoding', None) or 'ascii'
             try:
-                data = data.encode(self.inner_file.encoding, 'replace')
-            except:
-                data = data.encode('ascii', 'replace')
+                data = data.decode(enc, 'replace')
+            except (LookupError, TypeError, AttributeError):
+                data = data.decode('ascii', 'replace')
         self.inner_file.write(data)
     def flush(self):
         self.inner_file.flush()
@@ -34,7 +39,7 @@ class LogFile(object):
         if length > 100*1000*1000:
             f.seek(-1000*1000, os.SEEK_END)
             while True:
-                if f.read(1) in ('', '\n'):
+                if f.read(1) in (b'', b'\n'):
                     break
             data = f.read()
             f.close()

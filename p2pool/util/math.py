@@ -1,6 +1,6 @@
 from __future__ import absolute_import, division
 
-import __builtin__
+import builtins
 import math
 import random
 import time
@@ -37,7 +37,8 @@ def shift_left(n, m):
         return n << m
     return n >> -m
 
-def clip(x, (low, high)):
+def clip(x, bounds):
+    low, high = bounds
     if x < low:
         return low
     elif x > high:
@@ -45,13 +46,15 @@ def clip(x, (low, high)):
     else:
         return x
 
-add_to_range = lambda x, (low, high): (min(low, x), max(high, x))
+def add_to_range(x, bounds):
+    low, high = bounds
+    return (min(low, x), max(high, x))
 
 def nth(i, n=0):
     i = iter(i)
-    for _ in xrange(n):
-        i.next()
-    return i.next()
+    for _ in range(n):
+        next(i)
+    return next(i)
 
 def geometric(p):
     if p <= 0 or p > 1:
@@ -64,13 +67,13 @@ def add_dicts_ext(add_func=lambda a, b: a+b, zero=0):
     def add_dicts(*dicts):
         res = {}
         for d in dicts:
-            for k, v in d.iteritems():
+            for k, v in d.items():
                 res[k] = add_func(res.get(k, zero), v)
-        return dict((k, v) for k, v in res.iteritems() if v != zero)
+        return dict((k, v) for k, v in res.items() if v != zero)
     return add_dicts
 add_dicts = add_dicts_ext()
 
-mult_dict = lambda c, x: dict((k, c*v) for k, v in x.iteritems())
+mult_dict = lambda c, x: dict((k, c*v) for k, v in x.items())
 
 def format(x, add_space=False):
     prefixes = 'kMGTPEZY'
@@ -119,7 +122,7 @@ def erf(x):
 
 def find_root(y_over_dy, start, steps=10, bounds=(None, None)):
     guess = start
-    for i in xrange(steps):
+    for i in range(steps):
         prev, guess = guess, guess - y_over_dy(guess)
         if bounds[0] is not None and guess < bounds[0]: guess = bounds[0]
         if bounds[1] is not None and guess > bounds[1]: guess = bounds[1]
@@ -148,18 +151,18 @@ minmax = lambda x: (min(x), max(x))
 def format_binomial_conf(x, n, conf=0.95, f=lambda x: x):
     if n == 0:
         return '???'
-    left, right = minmax(map(f, binomial_conf_interval(x, n, conf)))
+    left, right = minmax(list(map(f, binomial_conf_interval(x, n, conf))))
     return '~%.1f%% (%.f-%.f%%)' % (100*f(x/n), math.floor(100*left), math.ceil(100*right))
 
 def reversed(x):
     try:
-        return __builtin__.reversed(x)
+        return builtins.reversed(x)
     except TypeError:
         return reversed(list(x))
 
 class Object(object):
     def __init__(self, **kwargs):
-        for k, v in kwargs.iteritems():
+        for k, v in kwargs.items():
             setattr(self, k, v)
 
 def add_tuples(res, *tuples):
@@ -184,13 +187,15 @@ def weighted_choice(choices):
     raise AssertionError()
 
 def natural_to_string(n, alphabet=None):
+    """Natural number -> byte string (no alphabet) or text (with alphabet)."""
     if n < 0:
         raise TypeError('n must be a natural')
     if alphabet is None:
         s = ('%x' % (n,)).lstrip('0')
         if len(s) % 2:
             s = '0' + s
-        return s.decode('hex')
+        # Python 2's binascii.unhexlify(str) became bytes.fromhex()
+        return bytes.fromhex(s)
     else:
         assert len(set(alphabet)) == len(alphabet)
         res = []
@@ -201,13 +206,17 @@ def natural_to_string(n, alphabet=None):
         return ''.join(res)
 
 def string_to_natural(s, alphabet=None):
+    """Byte string (no alphabet) or text (with alphabet) -> natural number."""
     if alphabet is None:
-        assert not s.startswith('\x00')
-        return int(s.encode('hex'), 16) if s else 0
+        # s is bytes; s[0] is already an int, so compare against b'\x00'.
+        assert not s.startswith(b'\x00')
+        return int(s.hex(), 16) if s else 0
     else:
         assert len(set(alphabet)) == len(alphabet)
         assert not s.startswith(alphabet[0])
-        return sum(alphabet.index(char) * len(alphabet)**i for i, char in enumerate(reversed(s)))
+        # Iterating a str yields 1-char strings, so alphabet.index() works.
+        return sum(alphabet.index(char) * len(alphabet)**i
+                   for i, char in enumerate(reversed(s)))
 
 class RateMonitor(object):
     def __init__(self, max_lookback_time):

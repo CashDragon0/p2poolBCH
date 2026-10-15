@@ -64,13 +64,13 @@ class LinkedList(object):
     def __getitem__(self, index):
         if index < 0:
             cur = self.end
-            for i in xrange(-index):
+            for i in range(-index):
                 cur = cur.prev
                 if cur is self.start:
                     raise IndexError('index out of range')
         else:
             cur = self.start
-            for i in xrange(index + 1):
+            for i in range(index + 1):
                 cur = cur.next
                 if cur is self.end:
                     raise IndexError('index out of range')
@@ -173,8 +173,8 @@ class ExpiringDict(object):
         return self.d.keys()
     
     def values(self):
-        return [value for node, value in self.d.itervalues()]
+        return [value for node, value in self.d.values()]
     
     def itervalues(self):
-        for node, value in self.d.itervalues():
+        for node, value in self.d.values():
             yield value

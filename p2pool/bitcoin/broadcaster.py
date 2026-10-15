@@ -1068,7 +1068,7 @@ class NetworkBroadcaster(object):
             # Write atomically
             tmp_path = db_path + '.tmp'
             with open(tmp_path, 'wb') as f:
-                f.write(json.dumps(data, indent=2))
+                f.write(json.dumps(data, indent=2).encode('utf-8'))
             
             try:
                 os.rename(tmp_path, db_path)

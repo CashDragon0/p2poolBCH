@@ -20,7 +20,13 @@
 # THE SOFTWARE.
 
 import unittest
-import mock
+try:
+    import mock
+except ImportError:  # py3: no standalone mock package; use stdlib backport
+    import sys
+    from unittest import mock as _mock
+    sys.modules['mock'] = _mock
+    import mock
 
 from p2pool.util import segwit_addr
 

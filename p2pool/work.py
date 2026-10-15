@@ -1,6 +1,7 @@
 from __future__ import division
 from collections import deque
 
+import binascii
 import base64
 import os as _os
 import random
@@ -11,9 +12,9 @@ import time
 from twisted.internet import defer
 from twisted.python import log
 
-import bitcoin.getwork as bitcoin_getwork, bitcoin.data as bitcoin_data
-from bitcoin import helper, script, worker_interface
-from util import forest, jsonrpc, variable, deferral, math, pack
+from .bitcoin import getwork as bitcoin_getwork, data as bitcoin_data
+from .bitcoin import helper, script, worker_interface
+from .util import forest, jsonrpc, variable, deferral, math, pack
 import p2pool, p2pool.data as p2pool_data
 
 # Server-side per-worker fixed-diff override.  Equivalent to the username
@@ -43,11 +44,11 @@ try:
                 if _prefix and _diff_val > 0:
                     _FIXED_DIFF_PER_WORKER[_prefix] = _diff_val
         if _FIXED_DIFF_PER_WORKER:
-            print 'WORK: per-worker fixed-diff overrides via STRATUM_FIXED_DIFF_PER_WORKER:'
+            print('WORK: per-worker fixed-diff overrides via STRATUM_FIXED_DIFF_PER_WORKER:')
             for _k, _v in sorted(_FIXED_DIFF_PER_WORKER.items()):
-                print '  worker prefix %r -> fixed diff %g' % (_k, _v)
+                print('  worker prefix %r -> fixed diff %g' % (_k, _v))
 except Exception as _e:
-    print >>sys.stderr, 'WORK: failed to parse STRATUM_FIXED_DIFF_PER_WORKER: %s' % _e
+    print('WORK: failed to parse STRATUM_FIXED_DIFF_PER_WORKER: %s' % _e, file=sys.stderr)
 
 # Optional experiment toggle: build scriptSig coinbase bytes in kr1z1s order
 # to test FR-1.15 stock-firmware sensitivity to exact scriptSig layout.
@@ -64,9 +65,9 @@ _KR1Z1S_EXACT_COINBASE = _os.environ.get('STRATUM_KR1Z1S_EXACT_COINBASE', '').st
     '1', 'true', 'yes', 'on'
 )
 if _KR1Z1S_COINBASE_ORDER:
-    print 'WORK: STRATUM_KR1Z1S_COINBASE_ORDER=1 (using kr1z1s scriptSig assembly order)'
+    print('WORK: STRATUM_KR1Z1S_COINBASE_ORDER=1 (using kr1z1s scriptSig assembly order)')
 if _KR1Z1S_EXACT_COINBASE:
-    print 'WORK: STRATUM_KR1Z1S_EXACT_COINBASE=1 (kr1z1s order + drops --coinbtext from push)'
+    print('WORK: STRATUM_KR1Z1S_EXACT_COINBASE=1 (kr1z1s order + drops --coinbtext from push)')
 
 # Hypothesised FR-1.15 retention discriminator surfaced 2026-05-04 from
 # decompilation of kr1z1s' full codebase (12 unreleased commits past
@@ -85,9 +86,44 @@ _KR1Z1S_SHARE_TARGET_CAP = _os.environ.get('STRATUM_KR1Z1S_SHARE_TARGET_CAP', ''
     '1', 'true', 'yes', 'on'
 )
 if _KR1Z1S_SHARE_TARGET_CAP:
-    print 'WORK: STRATUM_KR1Z1S_SHARE_TARGET_CAP=1 (3600x easier per-miner share-target cap, kr1z1s-style)'
+    print('WORK: STRATUM_KR1Z1S_SHARE_TARGET_CAP=1 (3600x easier per-miner share-target cap, kr1z1s-style)')
 
 print_throttle = 0.0
+
+def _stale_info(counts, total, recorded):
+    """Classify a share's staleness. This value is part of the share's signed
+    payload, so it must be computed exactly as before."""
+    orphans, doas = counts
+    orphans_recorded_in_chain, doas_recorded_in_chain = recorded
+    return ('orphan' if orphans > orphans_recorded_in_chain else
+            'doa' if doas > doas_recorded_in_chain else
+            None)
+
+
+# BCHN consensus (src/consensus/tx_check.cpp:62-65): the coinbase scriptSig
+# must be 2..100 bytes.  A shorter scriptSig is rejected with 'bad-cb-length'.
+#
+# On regtest, BCHN's COINBASE_FLAGS is a global with no assignment, so GBT
+# reports coinbaseaux.flags == '' and the coinbase push is just the BIP34
+# height -- a single byte for heights 1..16 (OP_1..OP_16 == 0x51..0x60).
+# The naive [:100] slice also truncates the middle of a push and can
+# leave a 1-byte fragment behind.  Both cases are rejected with bad-cb-length
+# even though the height itself is valid.  The fix: keep the assembled bytes
+# intact, pad them out to at least 2 bytes with a trailing OP_0, and drop a
+# trailing 1-byte fragment left by the 100-byte cap.
+_COINBASE_SCRIPTSIG_MIN = 2
+_COINBASE_SCRIPTSIG_MAX = 100
+
+def _pad_coinbase_script(script_bytes):
+    if len(script_bytes) >= _COINBASE_SCRIPTSIG_MAX:
+        # 100-byte cap reached: drop a trailing 1-byte fragment (a lone length
+        # prefix left by the slice) rather than the height push that precedes
+        # it, so the script stays parseable and stays >= 2 bytes.
+        return script_bytes[:_COINBASE_SCRIPTSIG_MAX - 1]
+    if len(script_bytes) < _COINBASE_SCRIPTSIG_MIN:
+        return script_bytes + b'\x00' * (_COINBASE_SCRIPTSIG_MIN - len(script_bytes))
+    return script_bytes
+
 
 class WorkerBridge(worker_interface.WorkerBridge):
     # COINBASE_NONCE_LENGTH MUST stay 8 here.  The Share class in data.py
@@ -130,8 +166,8 @@ class WorkerBridge(worker_interface.WorkerBridge):
         # Semantic worker-state events.  These deduplicate the per-socket events
         # via refcount: first_connected fires only when the worker has zero
         # active sockets and a new one arrives; last_disconnected fires only
-        # when the final socket closes.  External notifiers (telegram, etc.)
-        # MUST subscribe to these instead of the raw events.
+        # when the final socket closes.  External notifiers MUST subscribe to
+        # these instead of the raw events.
         self.worker_first_connected = variable.Event()    # args: (username, address, peer_ip)
         self.worker_last_disconnected = variable.Event()  # args: (username, address, peer_ip)
         # Silence detection: connected workers that haven't submitted any
@@ -203,7 +239,7 @@ class WorkerBridge(worker_interface.WorkerBridge):
         SILENT_CHECK_INTERVAL = 60
         def _check_silent_workers():
             now = time.time()
-            for username, info in list(self.connected_workers.iteritems()):
+            for username, info in list(self.connected_workers.items()):
                 last_submit = info.get('last_submit_time') or info.get('since', now)
                 idle = now - last_submit
                 if idle >= SILENT_THRESHOLD:
@@ -250,7 +286,7 @@ class WorkerBridge(worker_interface.WorkerBridge):
                 target = auxblock['target'] if 'target' in auxblock else auxblock['_target']
                 self.merged_work.set(math.merge_dicts(self.merged_work.value, {auxblock['chainid']: dict(
                     hash=int(auxblock['hash'], 16),
-                    target='p2pool' if target == 'p2pool' else pack.IntType(256).unpack(target.decode('hex')),
+                    target='p2pool' if target == 'p2pool' else pack.IntType(256).unpack(binascii.unhexlify(target)),
                     merged_proxy=merged_proxy,
                     merged_address=merged_address,
                 )}))
@@ -260,7 +296,7 @@ class WorkerBridge(worker_interface.WorkerBridge):
         
         @self.merged_work.changed.watch
         def _(new_merged_work):
-            print 'Got new merged mining work!'
+            print('Got new merged mining work!')
         
         # COMBINE WORK
         
@@ -269,13 +305,19 @@ class WorkerBridge(worker_interface.WorkerBridge):
             t = self.node.bitcoind_work.value
             bb = self.node.best_block_header.value
             if bb is not None and bb['previous_block'] == t['previous_block'] and self.node.net.PARENT.POW_FUNC(bitcoin_data.block_header_type.pack(bb)) <= t['bits'].target:
-                print 'Skipping from block %x to block %x!' % (bb['previous_block'],
-                    bitcoin_data.hash256(bitcoin_data.block_header_type.pack(bb)))
+                print('Skipping from block %x to block %x!' % (bb['previous_block'],
+                    bitcoin_data.hash256(bitcoin_data.block_header_type.pack(bb))))
                 t = dict(
                     version=bb['version'],
                     previous_block=bitcoin_data.hash256(bitcoin_data.block_header_type.pack(bb)),
                     bits=bb['bits'], # not always true
-                    coinbaseflags='',
+                    # py3: this dict mirrors bitcoind_work from helper.py:157,
+                    # whose coinbaseflags is bytes (binascii.unhexlify). In py2
+                    # str WAS bytes so '' worked; here it must be b'' or the
+                    # _coinbase_script concat at work.py:645 raises
+                    # "can't concat str to bytes" on the best-block-header
+                    # skip path.
+                    coinbaseflags=b'',
                     height=t['height'] + 1,
                     time=max(int(time.time() + 0.5), bb['timestamp'] + 1),
                     transactions=[],
@@ -325,16 +367,16 @@ class WorkerBridge(worker_interface.WorkerBridge):
         if self.cur_address_throttle - self.address_throttle < 30:
             return
         self.address_throttle=time.time()
-        print "ATTEMPTING TO FRESHEN ADDRESS."
+        print("ATTEMPTING TO FRESHEN ADDRESS.")
         self.address = yield deferral.retry('Error getting a dynamic address from bitcoind:', 5)(lambda: self.bitcoind.rpc_getnewaddress('p2pool'))()
         self.pubkeys.popleft()
         self.pubkeys.addkey({'address': self.address})
-        print " Updated payout pool:"
+        print(" Updated payout pool:")
         for i in range(len(self.pubkeys.keys)):
             print('    ...payout %d: %s(%f)' %
                     (i, self.address, self.pubkeys.keyweights[i]))
         self.pubkeys.updatestamp(c)
-        print " Next address rotation in : %fs" % (time.time()-c+self.args.timeaddresses)
+        print(" Next address rotation in : %fs" % (time.time()-c+self.args.timeaddresses))
  
     def get_user_details(self, username):
         contents = re.split('([+/])', username)
@@ -418,15 +460,22 @@ class WorkerBridge(worker_interface.WorkerBridge):
     
     def _estimate_local_hash_rate(self):
         if len(self.recent_shares_ts_work) == 50:
-            hash_rate = sum(work for ts, work in self.recent_shares_ts_work[1:])//(self.recent_shares_ts_work[-1][0] - self.recent_shares_ts_work[0][0])
-            if hash_rate > 0:
-                return hash_rate
+            dt = self.recent_shares_ts_work[-1][0] - self.recent_shares_ts_work[0][0]
+            # Shares can land within the same clock tick, collapsing the
+            # window's span to 0. Report "no estimate" rather than dividing
+            # by zero; callers treat None as a cold start.
+            if dt > 0:
+                hash_rate = sum(work for ts, work in self.recent_shares_ts_work[1:])//dt
+                if hash_rate > 0:
+                    return hash_rate
         return None
     
     def get_local_rates(self):
         miner_hash_rates = {}
         miner_dead_hash_rates = {}
         datums, dt = self.local_rate_monitor.get_datums_in_last()
+        if dt <= 0:
+            return miner_hash_rates, miner_dead_hash_rates
         for datum in datums:
             miner_hash_rates[datum['user']] = miner_hash_rates.get(datum['user'], 0) + datum['work']/dt
             if datum['dead']:
@@ -436,6 +485,8 @@ class WorkerBridge(worker_interface.WorkerBridge):
     def get_local_addr_rates(self):
         addr_hash_rates = {}
         datums, dt = self.local_addr_rate_monitor.get_datums_in_last()
+        if dt <= 0:
+            return addr_hash_rates
         for datum in datums:
             addr_hash_rates[datum['address']] = \
                     addr_hash_rates.get(datum['address'], 0) + datum['work']/dt
@@ -451,19 +502,19 @@ class WorkerBridge(worker_interface.WorkerBridge):
             raise jsonrpc.Error_for_code(-12345)(u'p2pool is downloading shares')
         unknown_rules = set(r[1:] if r.startswith('!') else r for r in self.node.bitcoind_work.value['rules'] if r) - set(getattr(self.node.net, 'SOFTFORKS_REQUIRED', []))
         if unknown_rules:
-            print "Unknown softforks found: ", unknown_rules
-            print "Required softforks: ", self.node.bitcoind_work.value['rules'], "\tKnown: ", getattr(self.node.net, 'SOFTFORKS_REQUIRED', [])
+            print("Unknown softforks found: ", unknown_rules)
+            print("Required softforks: ", self.node.bitcoind_work.value['rules'], "\tKnown: ", getattr(self.node.net, 'SOFTFORKS_REQUIRED', []))
             raise jsonrpc.Error_for_code(-12345)(u'unknown rule activated')
         
         if self.merged_work.value:
             tree, size = bitcoin_data.make_auxpow_tree(self.merged_work.value)
-            mm_hashes = [self.merged_work.value.get(tree.get(i), dict(hash=0))['hash'] for i in xrange(size)]
-            mm_data = '\xfa\xbemm' + bitcoin_data.aux_pow_coinbase_type.pack(dict(
+            mm_hashes = [self.merged_work.value.get(tree.get(i), dict(hash=0))['hash'] for i in range(size)]
+            mm_data = b'\xfa\xbemm' + bitcoin_data.aux_pow_coinbase_type.pack(dict(
                 merkle_root=bitcoin_data.merkle_hash(mm_hashes),
                 size=size,
                 nonce=0,
             ))
-            mm_later = [(aux_work, mm_hashes.index(aux_work['hash']), mm_hashes) for chain_id, aux_work in self.merged_work.value.iteritems()]
+            mm_later = [(aux_work, mm_hashes.index(aux_work['hash']), mm_hashes) for chain_id, aux_work in self.merged_work.value.items()]
         else:
             # Optional: inject a *fake* AuxPoW commitment into the coinbase
             # scriptSig (fabe6d6d magic + zero aux merkle root + dummy
@@ -483,13 +534,17 @@ class WorkerBridge(worker_interface.WorkerBridge):
             # and don't change the share-chain commitment.
             import os as _os_for_auxmm_flag
             if _os_for_auxmm_flag.environ.get('STRATUM_FAKE_AUXMM', '').strip().lower() in ('1', 'true', 'yes', 'on'):
-                mm_data = '\xfa\xbemm' + bitcoin_data.aux_pow_coinbase_type.pack(dict(
+                mm_data = b'\xfa\xbemm' + bitcoin_data.aux_pow_coinbase_type.pack(dict(
                     merkle_root=0,   # zero — no actual aux chain committed
                     size=1,          # 1-leaf tree
                     nonce=0,
                 ))
             else:
-                mm_data = ''
+                # py3: this must be bytes. '' (str) reaches create_push_script
+                # and b''.join() raises TypeError, which the bare except at
+                # got_response swallows -> every block submit silently dies.
+                # py2 was fine because '' was bytes there.
+                mm_data = b''
             mm_later = []
         
         tx_hashes = self.current_work.value['transaction_hashes']
@@ -510,11 +565,11 @@ class WorkerBridge(worker_interface.WorkerBridge):
                 
                 counts = p2pool_data.get_desired_version_counts(self.node.tracker,
                     self.node.tracker.get_nth_parent_hash(previous_share.hash, self.node.net.CHAIN_LENGTH*9//10), self.node.net.CHAIN_LENGTH//10)
-                upgraded = counts.get(successor_type.VERSION, 0)/sum(counts.itervalues())
+                upgraded = counts.get(successor_type.VERSION, 0)/sum(counts.values())
                 if upgraded > .65:
-                    print 'Switchover imminent. Upgraded: %.3f%% Threshold: %.3f%%' % (upgraded*100, 95)
+                    print('Switchover imminent. Upgraded: %.3f%% Threshold: %.3f%%' % (upgraded*100, 95))
                 # Share -> NewShare only valid if 95% of hashes in [net.CHAIN_LENGTH*9//10, net.CHAIN_LENGTH] for new version
-                if counts.get(successor_type.VERSION, 0) > sum(counts.itervalues())*95//100:
+                if counts.get(successor_type.VERSION, 0) > sum(counts.values())*95//100:
                     share_type = successor_type
                 else:
                     share_type = previous_share_type
@@ -538,7 +593,7 @@ class WorkerBridge(worker_interface.WorkerBridge):
                     bitcoin_data.average_attempts_to_target(cap_attempts)) # limit to 1.67% of pool shares by modulating share difficulty
             
             if self.node.punish:
-                print "trying to punish a share by mining a low-diff share"
+                print("trying to punish a share by mining a low-diff share")
                 desired_share_target = bitcoin_data.difficulty_to_target(1.)
             local_addr_rates = self.get_local_addr_rates()
             lookbehind = 3600//self.node.net.SHARE_PERIOD
@@ -546,7 +601,18 @@ class WorkerBridge(worker_interface.WorkerBridge):
             if previous_share is not None and self.node.tracker.get_height(previous_share.hash) > lookbehind:
                 expected_payout_per_block = local_addr_rates.get(address, 0)/p2pool_data.get_pool_attempts_per_second(self.node.tracker, self.node.best_share_var.value, lookbehind) \
                     * block_subsidy*(1-self.donation_percentage/100) # XXX doesn't use global stale rate to compute pool hash
-                if expected_payout_per_block < self.node.net.PARENT.DUST_THRESHOLD:
+                if expected_payout_per_block < self.node.net.PARENT.DUST_THRESHOLD and block_subsidy > 0:
+                    # block_subsidy > 0: this is BCHN's coinbasevalue, not
+                    # SUBSIDY_FUNC (helper.py sets subsidy=work['coinbasevalue']).
+                    # BCHN regtest halves every 210000 blocks, so coinbasevalue
+                    # reaches 0 once the chain passes that height. Dividing
+                    # DUST_THRESHOLD by it would raise ZeroDivisionError and
+                    # abort the getwork request. Skipping is the correct dust
+                    # behaviour: a zero-subsidy block can never pay above the
+                    # threshold, so there is no target worth deriving.
+                    # Inherited from upstream -- the py2 tree has the same
+                    # unguarded division at work.py:551 -- so the py2 reference
+                    # is left unpatched to stay a faithful baseline.
                     desired_share_target = min(desired_share_target,
                         bitcoin_data.average_attempts_to_target((bitcoin_data.target_to_average_attempts(self.node.bitcoind_work.value['bits'].target)*self.node.net.SPREAD)*self.node.net.PARENT.DUST_THRESHOLD/block_subsidy)
                     )
@@ -562,6 +628,10 @@ class WorkerBridge(worker_interface.WorkerBridge):
             # heuristic — push-prefixed text fails that check.  The
             # truncate-to-100 floor still applies (BIP34 scriptSig limit).
             _raw_suffix = _os.environ.get('STRATUM_COINBASE_RAW_SUFFIX', '')
+            if isinstance(_raw_suffix, str):
+                # py3: env vars are str; this concatenates with bytes below
+                # (py2 str WAS bytes; latin-1 preserves byte values 0-255)
+                _raw_suffix = _raw_suffix.encode('latin-1')
             # EXACT_COINBASE drops --coinbtext from the push to fully match
             # kr1z1s' [height, mm_data] push shape.  Implies kr1z1s order.
             if _KR1Z1S_EXACT_COINBASE:
@@ -576,9 +646,10 @@ class WorkerBridge(worker_interface.WorkerBridge):
                 #   push(height, mm_data[, coinb_texts]) + raw_suffix + coinbaseflags
                 # Default mode keeps existing order:
                 #   push(height, mm_data, coinb_texts) + coinbaseflags + raw_suffix
-                _coinbase_script = (_coinbase_push + _raw_suffix + self.current_work.value['coinbaseflags'])[:100]
+                _coinbase_script = _coinbase_push + _raw_suffix + self.current_work.value['coinbaseflags']
             else:
-                _coinbase_script = (_coinbase_push + self.current_work.value['coinbaseflags'] + _raw_suffix)[:100]
+                _coinbase_script = _coinbase_push + self.current_work.value['coinbaseflags'] + _raw_suffix
+            _coinbase_script = _pad_coinbase_script(_coinbase_script)
             share_info, gentx, other_transaction_hashes, get_share = share_type.generate_transaction(
                 tracker=self.node.tracker,
                 share_data=dict(
@@ -588,18 +659,29 @@ class WorkerBridge(worker_interface.WorkerBridge):
                     address=address,
                     subsidy=self.current_work.value['subsidy'],
                     donation=math.perfect_round(65535*self.donation_percentage/100),
-                    stale_info=(lambda (orphans, doas), total, (orphans_recorded_in_chain, doas_recorded_in_chain):
-                        'orphan' if orphans > orphans_recorded_in_chain else
-                        'doa' if doas > doas_recorded_in_chain else
-                        None
-                    )(*self.get_stale_counts()),
+                    # NOTE: share_data['stale_info'] is a CONSENSUS FIELD.
+                    # It is 'orphan' when a share's orphan count exceeds what
+                    # the chain already recorded, 'doa' for dead-on-arrival,
+                    # otherwise None. Preserve the comparison direction.
+                    stale_info=_stale_info(*self.get_stale_counts()),
                     desired_version=(share_type.SUCCESSOR if share_type.SUCCESSOR is not None else share_type).VOTING_VERSION,
                 ),
                 block_target=self.current_work.value['bits'].target,
                 desired_timestamp=int(time.time() + 0.5),
                 desired_target=desired_share_target,
                 ref_merkle_link=dict(branch=[], index=0),
-                desired_other_transaction_hashes_and_fees=zip(tx_hashes, self.current_work.value['transaction_fees']),
+                # CRITICAL: this MUST be a list, not a lazy iterator.
+                # The value is consumed THREE times in
+                # p2pool/data.py::generate_transaction:
+                #   :190  a for-loop over it
+                #   :246  removed_fees = [...]
+                #   :247  definite_fees = sum(...)
+                # Under Python 2 zip() returned a list so all three saw the
+                # same data. Under Python 3 the 2nd and 3rd iterations would
+                # yield nothing, giving removed_fees == [] and
+                # definite_fees == 0 -- which makes the share_info assertion
+                # at p2pool/data.py:552 fire on EVERY share.
+                desired_other_transaction_hashes_and_fees=list(zip(tx_hashes, self.current_work.value['transaction_fees'])),
                 net=self.node.net,
                 known_txs=tx_map,
                 base_subsidy=self.node.net.PARENT.SUBSIDY_FUNC(self.current_work.value['height']),
@@ -609,7 +691,8 @@ class WorkerBridge(worker_interface.WorkerBridge):
         other_transactions = [tx_map[tx_hash] for tx_hash in other_transaction_hashes]
 
         del tx_hashes
-        if self.node.cur_share_ver >= 34:
+        # py2: None >= 34 was False before the first share set cur_share_ver
+        if self.node.cur_share_ver is not None and self.node.cur_share_ver >= 34:
             tx_map = {} # we can free up this memory now
         
         mm_later = [(dict(aux_work, target=aux_work['target'] if aux_work['target'] != 'p2pool' else share_info['bits'].target), index, hashes) for aux_work, index, hashes in mm_later]
@@ -658,17 +741,17 @@ class WorkerBridge(worker_interface.WorkerBridge):
         merkle_link = bitcoin_data.calculate_merkle_link([None] + other_transaction_hashes, 0) if share_info.get('segwit_data', None) is None else share_info['segwit_data']['txid_merkle_link']
         del other_transaction_hashes
 
-        if print_throttle is 0.0:
+        if print_throttle == 0.0:
             print_throttle = time.time()
         else:
             current_time = time.time()
             if (current_time - print_throttle) > 5.0:
-                print 'New work! Share diff: %.02f Block value: %.2f %s (%i tx, %.0f kB)' % (
+                print('New work! Share diff: %.02f Block value: %.2f %s (%i tx, %.0f kB)' % (
                     bitcoin_data.target_to_difficulty(share_info['bits'].target),
                     self.current_work.value['subsidy']*1e-8, self.node.net.PARENT.SYMBOL,
                     len(self.current_work.value['transactions']),
                     sum((bitcoin_data.get_size(tx) for tx in self.current_work.value['transactions']))/1000.,
-                )
+                ))
                 print_throttle = time.time()
 
         #need this for stats
@@ -691,8 +774,11 @@ class WorkerBridge(worker_interface.WorkerBridge):
         def got_response(header, username, coinbase_nonce, pseudoshare_target):
             t0 = time.time()
             assert len(coinbase_nonce) == self.COINBASE_NONCE_LENGTH
-            new_packed_gentx = packed_gentx[:-self.COINBASE_NONCE_LENGTH-4] + coinbase_nonce + packed_gentx[-4:] if coinbase_nonce != '\0'*self.COINBASE_NONCE_LENGTH else packed_gentx
-            new_gentx = bitcoin_data.tx_type.unpack(new_packed_gentx) if coinbase_nonce != '\0'*self.COINBASE_NONCE_LENGTH else gentx
+            # py3: coinbase_nonce is bytes; the sentinel must be bytes too
+            # (py2 str was bytes, so '\0' worked there)
+            _null_nonce = b'\0'*self.COINBASE_NONCE_LENGTH
+            new_packed_gentx = packed_gentx[:-self.COINBASE_NONCE_LENGTH-4] + coinbase_nonce + packed_gentx[-4:] if coinbase_nonce != _null_nonce else packed_gentx
+            new_gentx = bitcoin_data.tx_type.unpack(new_packed_gentx) if coinbase_nonce != _null_nonce else gentx
             if bitcoin_data.is_segwit_tx(gentx): # reintroduce witness data to the gentx produced by stratum miners
                 new_gentx['marker'] = 0
                 new_gentx['flag'] = gentx['flag']
@@ -703,9 +789,9 @@ class WorkerBridge(worker_interface.WorkerBridge):
             try:
                 if pow_hash <= header['bits'].target or p2pool.DEBUG:
                     if pow_hash <= header['bits'].target:
-                        print
-                        print 'GOT BLOCK FROM MINER! Passing to bitcoind! %s%064x' % (self.node.net.PARENT.BLOCK_EXPLORER_URL_PREFIX, header_hash)
-                        print
+                        print()
+                        print('GOT BLOCK FROM MINER! Passing to bitcoind! %s%064x' % (self.node.net.PARENT.BLOCK_EXPLORER_URL_PREFIX, header_hash))
+                        print()
                     helper.submit_block(dict(header=header, txs=[new_gentx] + other_transactions), False, self.node,
                         broadcaster=getattr(self.node, 'broadcaster', None))
             except:
@@ -737,7 +823,7 @@ class WorkerBridge(worker_interface.WorkerBridge):
                         else:
                             sub_meth = aux_work['merged_proxy'].rpc_getauxblock
                         df = deferral.retry('Error submitting merged block: (will retry)', 10, 10)(sub_meth)(
-                            pack.IntType(256, 'big').pack(aux_work['hash']).encode('hex'),
+                            pack.IntType(256, 'big').pack(aux_work['hash']).hex(),
                             bitcoin_data.aux_pow_type.pack(dict(
                                 merkle_tx=dict(
                                     tx=new_gentx,
@@ -746,14 +832,14 @@ class WorkerBridge(worker_interface.WorkerBridge):
                                 ),
                                 merkle_link=bitcoin_data.calculate_merkle_link(hashes, index),
                                 parent_block_header=header,
-                            )).encode('hex'),
+                            )).hex(),
                         )
                         @df.addCallback
                         def _(result, aux_work=aux_work):
                             if result != (pow_hash <= aux_work['target']):
-                                print >>sys.stderr, 'Merged block submittal result: %s Expected: %s' % (result, pow_hash <= aux_work['target'])
+                                print('Merged block submittal result: %s Expected: %s' % (result, pow_hash <= aux_work['target']), file=sys.stderr)
                             else:
-                                print 'Merged block submittal result: %s' % (result,)
+                                print('Merged block submittal result: %s' % (result,))
                         @df.addErrback
                         def _(err):
                             log.err(err, 'Error submitting merged block:')
@@ -764,23 +850,24 @@ class WorkerBridge(worker_interface.WorkerBridge):
                 last_txout_nonce = pack.IntType(8*self.COINBASE_NONCE_LENGTH).unpack(coinbase_nonce)
                 share = get_share(header, last_txout_nonce)
                 
-                print 'GOT SHARE! %s %s prev %s age %.2fs%s' % (
+                print('GOT SHARE! %s %s prev %s age %.2fs%s' % (
                     username,
                     p2pool_data.format_hash(share.hash),
                     p2pool_data.format_hash(share.previous_hash),
                     time.time() - getwork_time,
                     ' DEAD ON ARRIVAL' if not on_time else '',
-                )
+                ))
 
-                if self.node.cur_share_ver < 34:
+                # py2: None < 34 was True before the first share set cur_share_ver
+                if self.node.cur_share_ver is None or self.node.cur_share_ver < 34:
                     # node.py will sometimes forget transactions if bitcoind's work has changed since this stratum
                     # job was assigned. Fortunately, the tx_map is still in in our scope from this job, so we can use that
                     # to refill it if needed.
 
                     known_txs = self.node.known_txs_var.value
-                    missing = {hsh:val for (hsh, val) in tx_map.iteritems() if not hsh in known_txs}
+                    missing = {hsh:val for (hsh, val) in tx_map.items() if not hsh in known_txs}
                     if missing:
-                        print "Warning: %i transactions were erroneously evicted from known_txs_var. Refilling now." % len(missing)
+                        print("Warning: %i transactions were erroneously evicted from known_txs_var. Refilling now." % len(missing))
                         self.node.known_txs_var.add(missing)
 
                 self.my_share_hashes.add(share.hash)
@@ -791,11 +878,11 @@ class WorkerBridge(worker_interface.WorkerBridge):
                 if on_time or sibling_count < 4:
                     self.node.tracker.add(share)
                 else:
-                    print "Already have %i DOA shares with this parent. Not adding more." % sibling_count
+                    print("Already have %i DOA shares with this parent. Not adding more." % sibling_count)
                 if on_time:
                     self.node.set_best_share()
                 else:
-                    print "Not considering work switching to DOA share"
+                    print("Not considering work switching to DOA share")
                 
                 try:
                     if (pow_hash <= header['bits'].target or p2pool.DEBUG) and self.node.p2p_node is not None:
@@ -813,18 +900,18 @@ class WorkerBridge(worker_interface.WorkerBridge):
             if pow_hash > pseudoshare_target:
                 miss_ratio = float(pow_hash) / float(pseudoshare_target) if pseudoshare_target > 0 else float('inf')
                 age_ms = int((time.time() - getwork_time) * 1000)
-                print 'REJECT %s miss=%.3fx age=%dms ver=0x%08x%s' % (
+                print('REJECT %s miss=%.3fx age=%dms ver=0x%08x%s' % (
                     username, miss_ratio, age_ms, header['version'],
-                    ' DOA' if not on_time else '')
-                print 'Worker %s submitted share with hash > target:' % (username,)
-                print '    Hash:   %064x' % (pow_hash,)
-                print '    Target: %064x' % (pseudoshare_target,)
+                    ' DOA' if not on_time else ''))
+                print('Worker %s submitted share with hash > target:' % (username,))
+                print('    Hash:   %064x' % (pow_hash,))
+                print('    Target: %064x' % (pseudoshare_target,))
                 if username not in self.worker_shares:
                     self.worker_shares[username] = {'accepted': 0, 'rejected': 0}
                 self.worker_shares[username]['rejected'] += 1
                 self.total_shares['rejected'] += 1
             elif header_hash in received_header_hashes:
-                print >>sys.stderr, 'Worker %s submitted share more than once!' % (username,)
+                print('Worker %s submitted share more than once!' % (username,), file=sys.stderr)
             else:
                 accepted = True
                 received_header_hashes.add(header_hash)
@@ -848,7 +935,7 @@ class WorkerBridge(worker_interface.WorkerBridge):
                 if pow_diff > self.address_round_best_diff.get(address, 0):
                     self.address_round_best_diff[address] = pow_diff
             t1 = time.time()
-            if p2pool.BENCH and (t1-t0) > .01: print "%8.3f ms for work.py:got_response(%s)" % ((t1-t0)*1000., username)
+            if p2pool.BENCH and (t1-t0) > .01: print("%8.3f ms for work.py:got_response(%s)" % ((t1-t0)*1000., username))
 
             # Return tuple so stratum.py can distinguish "DOA but accepted" from
             # "rejected".  Old return was just on_time, which made stratum echo
@@ -856,5 +943,5 @@ class WorkerBridge(worker_interface.WorkerBridge):
             # as a reject and demotes our pool, even though we credit the share.
             return on_time, accepted
         t1 = time.time()
-        if p2pool.BENCH: print "%8.3f ms for work.py:get_work(%s, %s)" % ((t1-t0)*1000., user, address)
+        if p2pool.BENCH: print("%8.3f ms for work.py:get_work(%s, %s)" % ((t1-t0)*1000., user, address))
         return ba, got_response

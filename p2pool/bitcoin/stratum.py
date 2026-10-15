@@ -1,3 +1,4 @@
+import binascii
 import json
 import os
 import random
@@ -7,6 +8,7 @@ import time
 from twisted.internet import defer, protocol, reactor
 from twisted.web import client as web_client
 from twisted.python import log
+from p2pool.util.jsonrpc import get_page
 
 from p2pool.bitcoin import data as bitcoin_data, getwork
 from p2pool.util import expiring_dict, jsonrpc, pack
@@ -161,7 +163,7 @@ EXTRANONCE1_LEN      = int(_envfloat('STRATUM_EXTRANONCE1_LEN', 0))
 # Default 0 = current dedupe behaviour (smaller wire chatter).
 SET_DIFF_EVERY_NOTIFY = _envflag('STRATUM_SET_DIFF_EVERY_NOTIFY')
 if SET_DIFF_EVERY_NOTIFY:
-    print 'STRATUM: STRATUM_SET_DIFF_EVERY_NOTIFY=1 (set_difficulty 1:1 with every notify, kr1z1s-style)'
+    print('STRATUM: STRATUM_SET_DIFF_EVERY_NOTIFY=1 (set_difficulty 1:1 with every notify, kr1z1s-style)')
 # Defer the first set_difficulty/notify push until *after* mining.authorize
 # completes, instead of also firing one immediately after mining.subscribe.
 # Legacy behaviour: rpc_subscribe schedules a _send_work, then rpc_authorize
@@ -232,7 +234,7 @@ def _parse_sent_diff_mult_ua(envval):
             pattern, mult_str = item.rsplit(':', 1)
             result.append((pattern.strip().lower(), float(mult_str.strip())))
         except (ValueError, TypeError):
-            print 'STRATUM: ignoring malformed STRATUM_SENT_DIFF_MULT_UA entry: %r' % item
+            print('STRATUM: ignoring malformed STRATUM_SENT_DIFF_MULT_UA entry: %r' % item)
     return result
 _SENT_DIFF_MULT_UA_RAW = os.environ.get('STRATUM_SENT_DIFF_MULT_UA', '').strip()
 SENT_DIFF_MULT_UA    = _parse_sent_diff_mult_ua(_SENT_DIFF_MULT_UA_RAW)
@@ -252,49 +254,49 @@ _reject_diag_count = [0]
 # small ones.  Override with STRATUM_VARDIFF_CLIP=<F>.  Must be > 1.0.
 VARDIFF_CLIP         = max(1.001, _envfloat('STRATUM_VARDIFF_CLIP', 10.0))
 if DISABLE_ASICBOOST:
-    print 'STRATUM: ASICBoost (BIP310 version-rolling) DISABLED via STRATUM_DISABLE_ASICBOOST'
+    print('STRATUM: ASICBoost (BIP310 version-rolling) DISABLED via STRATUM_DISABLE_ASICBOOST')
 if DISABLE_LATENCY_PING:
-    print 'STRATUM: client.get_version latency ping DISABLED via STRATUM_DISABLE_LATENCY_PING'
+    print('STRATUM: client.get_version latency ping DISABLED via STRATUM_DISABLE_LATENCY_PING')
 if DISABLE_IDLE_NUDGE:
-    print 'STRATUM: idle-reconnect nudge DISABLED via STRATUM_DISABLE_IDLE_NUDGE'
+    print('STRATUM: idle-reconnect nudge DISABLED via STRATUM_DISABLE_IDLE_NUDGE')
 if NICEHASH_COMPAT:
-    print 'STRATUM: NiceHash-compatible subscribe response ENABLED via STRATUM_NICEHASH_COMPAT'
+    print('STRATUM: NiceHash-compatible subscribe response ENABLED via STRATUM_NICEHASH_COMPAT')
 if TRACE:
-    print 'STRATUM: per-connection dialog trace ENABLED via STRATUM_TRACE'
+    print('STRATUM: per-connection dialog trace ENABLED via STRATUM_TRACE')
 if REJECT_DUMP_PATH:
-    print 'STRATUM: reject forensics JSONL dump ENABLED via STRATUM_REJECT_DUMP_PATH=%s' % REJECT_DUMP_PATH
+    print('STRATUM: reject forensics JSONL dump ENABLED via STRATUM_REJECT_DUMP_PATH=%s' % REJECT_DUMP_PATH)
     if REJECT_DUMP_WORKER_PREFIX:
-        print 'STRATUM: reject dump worker-prefix filter = %r via STRATUM_REJECT_DUMP_WORKER_PREFIX' % REJECT_DUMP_WORKER_PREFIX
+        print('STRATUM: reject dump worker-prefix filter = %r via STRATUM_REJECT_DUMP_WORKER_PREFIX' % REJECT_DUMP_WORKER_PREFIX)
 if REJECT_ALT_PATHS_LOG:
-    print 'STRATUM: reject alternative-path diagnostics ENABLED via STRATUM_REJECT_ALT_PATHS_LOG'
+    print('STRATUM: reject alternative-path diagnostics ENABLED via STRATUM_REJECT_ALT_PATHS_LOG')
 if REJECT_DUMP_PATH or REJECT_ALT_PATHS_LOG:
-    print 'STRATUM: reject diagnostics will stop after %d rejects via STRATUM_REJECT_DUMP_LIMIT' % REJECT_DUMP_LIMIT
+    print('STRATUM: reject diagnostics will stop after %d rejects via STRATUM_REJECT_DUMP_LIMIT' % REJECT_DUMP_LIMIT)
 if MIN_INITIAL_DIFF > 0:
-    print 'STRATUM: minimum pseudoshare-difficulty floor = %g via STRATUM_MIN_INITIAL_DIFF' % MIN_INITIAL_DIFF
+    print('STRATUM: minimum pseudoshare-difficulty floor = %g via STRATUM_MIN_INITIAL_DIFF' % MIN_INITIAL_DIFF)
 if FIXED_INITIAL_DIFF > 0:
-    print 'STRATUM: FORCED initial pseudoshare difficulty = %g via STRATUM_FIXED_INITIAL_DIFF (overrides natural calc)' % FIXED_INITIAL_DIFF
+    print('STRATUM: FORCED initial pseudoshare difficulty = %g via STRATUM_FIXED_INITIAL_DIFF (overrides natural calc)' % FIXED_INITIAL_DIFF)
 if NO_SUBMIT_RATCHET_SECONDS > 0:
-    print 'STRATUM: no-submit DIFF RATCHET = x%.3g every %.1fs (cap %d) via STRATUM_NO_SUBMIT_RATCHET_SECONDS' % (VARDIFF_CLIP, NO_SUBMIT_RATCHET_SECONDS, NO_SUBMIT_RATCHET_MAX)
+    print('STRATUM: no-submit DIFF RATCHET = x%.3g every %.1fs (cap %d) via STRATUM_NO_SUBMIT_RATCHET_SECONDS' % (VARDIFF_CLIP, NO_SUBMIT_RATCHET_SECONDS, NO_SUBMIT_RATCHET_MAX))
 if RATCHET_PER_NOTIFY:
-    print 'STRATUM: per-notify DIFF RATCHET = x%.3g every new job (cap %d) via STRATUM_RATCHET_PER_NOTIFY' % (VARDIFF_CLIP, NO_SUBMIT_RATCHET_MAX)
+    print('STRATUM: per-notify DIFF RATCHET = x%.3g every new job (cap %d) via STRATUM_RATCHET_PER_NOTIFY' % (VARDIFF_CLIP, NO_SUBMIT_RATCHET_MAX))
 if IDLE_DOWNSHIFT_SECONDS > 0:
-    print 'STRATUM: idle DIFF DOWNSHIFT = /%g every %.1fs (floor %g) via STRATUM_IDLE_DOWNSHIFT_SECONDS' % (IDLE_DOWNSHIFT_FACTOR, IDLE_DOWNSHIFT_SECONDS, IDLE_DOWNSHIFT_FLOOR)
+    print('STRATUM: idle DIFF DOWNSHIFT = /%g every %.1fs (floor %g) via STRATUM_IDLE_DOWNSHIFT_SECONDS' % (IDLE_DOWNSHIFT_FACTOR, IDLE_DOWNSHIFT_SECONDS, IDLE_DOWNSHIFT_FLOOR))
 if NOTIFY_HEX_LE:
-    print 'STRATUM: mining.notify version/nbits/ntime hex sent as LITTLE-ENDIAN via STRATUM_NOTIFY_HEX_LE'
+    print('STRATUM: mining.notify version/nbits/ntime hex sent as LITTLE-ENDIAN via STRATUM_NOTIFY_HEX_LE')
 if EXTRANONCE1_LEN > 0:
-    print 'STRATUM: server-assigned extranonce1 = %d byte(s) per session via STRATUM_EXTRANONCE1_LEN' % EXTRANONCE1_LEN
+    print('STRATUM: server-assigned extranonce1 = %d byte(s) per session via STRATUM_EXTRANONCE1_LEN' % EXTRANONCE1_LEN)
 if NOTIFY_AFTER_AUTH:
-    print 'STRATUM: first work-push DEFERRED to post-authorize (no double-notify) via STRATUM_NOTIFY_AFTER_AUTH'
+    print('STRATUM: first work-push DEFERRED to post-authorize (no double-notify) via STRATUM_NOTIFY_AFTER_AUTH')
 if VARDIFF_CLIP != 10.0:
-    print 'STRATUM: vardiff per-ratchet clip = (%.3f, %.3f) via STRATUM_VARDIFF_CLIP=%.3f' % (1.0/VARDIFF_CLIP, VARDIFF_CLIP, VARDIFF_CLIP)
+    print('STRATUM: vardiff per-ratchet clip = (%.3f, %.3f) via STRATUM_VARDIFF_CLIP=%.3f' % (1.0/VARDIFF_CLIP, VARDIFF_CLIP, VARDIFF_CLIP))
 else:
-    print 'STRATUM: vardiff per-ratchet clip = (0.100, 10.000) (default; matches LTC+DOGE merged-v36)'
+    print('STRATUM: vardiff per-ratchet clip = (0.100, 10.000) (default; matches LTC+DOGE merged-v36)')
 if SENT_DIFF_MULT != 1.0:
-    print 'STRATUM: sent set_difficulty multiplier = %.4g via STRATUM_SENT_DIFF_MULT (fixes chip DIFF1 mismatch)' % SENT_DIFF_MULT
+    print('STRATUM: sent set_difficulty multiplier = %.4g via STRATUM_SENT_DIFF_MULT (fixes chip DIFF1 mismatch)' % SENT_DIFF_MULT)
 if SENT_DIFF_MULT_UA:
-    print 'STRATUM: per-UA sent-diff multiplier rules (%d) via STRATUM_SENT_DIFF_MULT_UA:' % len(SENT_DIFF_MULT_UA)
+    print('STRATUM: per-UA sent-diff multiplier rules (%d) via STRATUM_SENT_DIFF_MULT_UA:' % len(SENT_DIFF_MULT_UA))
     for _pat, _mul in SENT_DIFF_MULT_UA:
-        print '  "%s" -> %.4gx' % (_pat, _mul)
+        print('  "%s" -> %.4gx' % (_pat, _mul))
 
 def _ts():
     t = time.time()
@@ -308,12 +310,12 @@ def _append_reject_dump(row):
         if parent and not os.path.isdir(parent):
             os.makedirs(parent)
         with open(REJECT_DUMP_PATH, 'ab') as f:
-            f.write(json.dumps(row, sort_keys=True) + '\n')
+            f.write((json.dumps(row, sort_keys=True) + '\n').encode('utf-8'))
     except Exception:
         log.err(None, 'STRATUM: failed writing reject dump:')
 
 def _parse_u32_from_submit_hex(h, hex_is_le):
-    raw = h.decode('hex')
+    raw = binascii.unhexlify(h)
     if hex_is_le:
         return pack.IntType(32).unpack(raw)
     return pack.IntType(32).unpack(getwork._swap4(raw))
@@ -412,9 +414,9 @@ class StratumRPCMiningProvider(object):
         except Exception:
             ip = '?'
         parts = ' '.join('%s=%s' % (k, v) for k, v in fields.items())
-        print '[STRATUM_TRACE] %s [%s] [%s] %s %s%s%s' % (
+        print('[STRATUM_TRACE] %s [%s] [%s] %s %s%s%s' % (
             _ts(), ip, self.username or '-', direction, method,
-            ' ' if parts else '', parts)
+            ' ' if parts else '', parts))
 
     def rpc_subscribe(self, miner_version=None, session_id=None, *args):
         self.miner_ua = miner_version or ''
@@ -434,7 +436,7 @@ class StratumRPCMiningProvider(object):
         # completes — producing exactly ONE notify, matching kr1z1s / ckpool.
         if not NOTIFY_AFTER_AUTH:
             reactor.callLater(0, self._send_work)
-        en1_hex = self._extranonce1.encode('hex')
+        en1_hex = self._extranonce1.hex()
         en2_size = self.wb.COINBASE_NONCE_LENGTH - len(self._extranonce1)
         # Subscription IDs: short, session-correlated (en1 prefix + index),
         # matching kr1z1s's wire format which is observed handling Antminer
@@ -468,7 +470,7 @@ class StratumRPCMiningProvider(object):
     def rpc_authorize(self, username, password):
         self._trace('<--', 'authorize', user=username)
         if not hasattr(self, 'authorized'): # authorize can be called many times in one connection
-            print '>>>Authorize: %s from %s' % (username, self.transport.getPeer().host)
+            print('>>>Authorize: %s from %s' % (username, self.transport.getPeer().host))
             self.authorized = username
         self.username = username.strip()
         
@@ -578,8 +580,9 @@ class StratumRPCMiningProvider(object):
                 ip = self.wb.connected_workers.get(_username_snap or '', {}).get('ip')
                 if ip:
                     http_t0 = [time.time()]
-                    url = ('http://%s/api/system/info' % ip).encode('ascii')
-                    http_d = web_client.getPage(url, timeout=3)
+                    # getPage was removed in Twisted 21; url must be str.
+                    url = 'http://%s/api/system/info' % ip
+                    http_d = get_page(url, timeout=3)
                     def _on_http(data):
                         # bitaxe reports its own measured pool RTT
                         try:
@@ -645,9 +648,9 @@ class StratumRPCMiningProvider(object):
             #pool can send mining.set_version_mask at any time if the pool mask changes
 
         if 'minimum-difficulty' in extensions:
-            print 'Extension method minimum-difficulty not implemented'
+            print('Extension method minimum-difficulty not implemented')
         if 'subscribe-extranonce' in extensions:
-            print 'Extension method subscribe-extranonce not implemented'
+            print('Extension method subscribe-extranonce not implemented')
 
     _DEFERRED_WORK_LOG_INTERVAL = 30  # seconds between repeated startup-state log lines
 
@@ -755,19 +758,19 @@ class StratumRPCMiningProvider(object):
         # prevhash and merkle branches always go through _swap4 — that
         # convention is fixed by the stratum protocol.
         if NOTIFY_HEX_LE:
-            version_hex = pack.IntType(32).pack(x['version']).encode('hex')
-            nbits_hex   = pack.IntType(32).pack(x['bits'].bits).encode('hex')
-            ntime_hex   = pack.IntType(32).pack(x['timestamp']).encode('hex')
+            version_hex = pack.IntType(32).pack(x['version']).hex()
+            nbits_hex   = pack.IntType(32).pack(x['bits'].bits).hex()
+            ntime_hex   = pack.IntType(32).pack(x['timestamp']).hex()
         else:
-            version_hex = getwork._swap4(pack.IntType(32).pack(x['version'])).encode('hex')
-            nbits_hex   = getwork._swap4(pack.IntType(32).pack(x['bits'].bits)).encode('hex')
-            ntime_hex   = getwork._swap4(pack.IntType(32).pack(x['timestamp'])).encode('hex')
+            version_hex = getwork._swap4(pack.IntType(32).pack(x['version'])).hex()
+            nbits_hex   = getwork._swap4(pack.IntType(32).pack(x['bits'].bits)).hex()
+            ntime_hex   = getwork._swap4(pack.IntType(32).pack(x['timestamp'])).hex()
         self.other.svc_mining.rpc_notify(
             jobid, # jobid
-            getwork._swap4(pack.IntType(256).pack(x['previous_block'])).encode('hex'), # prevhash
-            x['coinb1'].encode('hex'), # coinb1
-            x['coinb2'].encode('hex'), # coinb2
-            [pack.IntType(256).pack(s).encode('hex') for s in x['merkle_link']['branch']], # merkle_branch
+            getwork._swap4(pack.IntType(256).pack(x['previous_block'])).hex(), # prevhash
+            x['coinb1'].hex(), # coinb1
+            x['coinb2'].hex(), # coinb2
+            [pack.IntType(256).pack(s).hex() for s in x['merkle_link']['branch']], # merkle_branch
             version_hex,
             nbits_hex,
             ntime_hex,
@@ -870,7 +873,7 @@ class StratumRPCMiningProvider(object):
             worker_info['last_submit_time'] = time.time()
             worker_info['submit_count'] = worker_info.get('submit_count', 0) + 1
         if job_id not in self.handler_map:
-            print >>sys.stderr, '''Couldn't link returned work's job id with its handler. This should only happen if this process was recently restarted!'''
+            print('''Couldn't link returned work's job id with its handler. This should only happen if this process was recently restarted!''', file=sys.stderr)
             #self.other.svc_client.rpc_reconnect().addErrback(lambda err: None)
             return False
         x, got_response, job_target, job_issue_time = self.handler_map[job_id]
@@ -879,7 +882,7 @@ class StratumRPCMiningProvider(object):
         # The combined length must still equal COINBASE_NONCE_LENGTH so
         # the resulting coinbase has the exact width the share-chain
         # generator built coinb1/coinb2 around.
-        miner_en2 = extranonce2.decode('hex')
+        miner_en2 = binascii.unhexlify(extranonce2)
         assert len(miner_en2) == self.wb.COINBASE_NONCE_LENGTH - len(self._extranonce1)
         coinb_nonce = self._extranonce1 + miner_en2
         assert len(coinb_nonce) == self.wb.COINBASE_NONCE_LENGTH
@@ -901,11 +904,11 @@ class StratumRPCMiningProvider(object):
         # we send LE hex, the miner echoes ntime/nonce back in LE hex
         # too, and we must decode without _swap4 to recover the integer.
         if NOTIFY_HEX_LE:
-            ntime_int = pack.IntType(32).unpack(ntime.decode('hex'))
-            nonce_int = pack.IntType(32).unpack(nonce.decode('hex'))
+            ntime_int = pack.IntType(32).unpack(binascii.unhexlify(ntime))
+            nonce_int = pack.IntType(32).unpack(binascii.unhexlify(nonce))
         else:
-            ntime_int = pack.IntType(32).unpack(getwork._swap4(ntime.decode('hex')))
-            nonce_int = pack.IntType(32).unpack(getwork._swap4(nonce.decode('hex')))
+            ntime_int = pack.IntType(32).unpack(getwork._swap4(binascii.unhexlify(ntime)))
+            nonce_int = pack.IntType(32).unpack(getwork._swap4(binascii.unhexlify(nonce)))
         header = dict(
             version=nversion,
             previous_block=x['previous_block'],
@@ -956,8 +959,8 @@ class StratumRPCMiningProvider(object):
                 n_le = _parse_u32_from_submit_hex(nonce, True)
 
                 coinb_nonce_swapped = miner_en2 + self._extranonce1
-                coinb_nonce_zero_prefix = ('\0' * len(self._extranonce1)) + miner_en2
-                coinb_nonce_zero_all = ('\0' * len(coinb_nonce))
+                coinb_nonce_zero_prefix = (b'\0' * len(self._extranonce1)) + miner_en2
+                coinb_nonce_zero_all = (b'\0' * len(coinb_nonce))
 
                 def _eval_path_full(label, version_i, t_i, n_i, coinb_nonce_i,
                                     coinb1_i=None, coinb2_i=None):
@@ -991,7 +994,7 @@ class StratumRPCMiningProvider(object):
                             header_version=version_i & 0xFFFFFFFF,
                             header_timestamp=t_packed,
                             header_nonce=n_i & 0xFFFFFFFF,
-                            coinbase_nonce_hex=coinb_nonce_i.encode('hex'),
+                            coinbase_nonce_hex=coinb_nonce_i.hex(),
                             coinb1_modified=(coinb1_i is not None),
                             coinb2_modified=(coinb2_i is not None),
                         ))
@@ -1045,16 +1048,16 @@ class StratumRPCMiningProvider(object):
                     # part of an FR-1.15 internal length-validation step
                     _eval_path_full('coinb1_zero_pool_nonce',
                                     nversion, ntime_int, nonce_int, coinb_nonce,
-                                    coinb1_i=inner_coinb1 + ('\0' * 4))
+                                    coinb1_i=inner_coinb1 + (b'\0' * 4))
 
                 alt_accept_paths = [r['label'] for r in alt_rows if r.get('would_accept')]
                 alt_has_zero_reject_path = bool(alt_accept_paths)
 
-                print 'REJECT_ALT %s job=%s age=%dms drift=%s zero_reject=%s accept_paths=%s %s' % (
+                print('REJECT_ALT %s job=%s age=%dms drift=%s zero_reject=%s accept_paths=%s %s' % (
                     worker_name, job_id, age_ms, drift,
                     'yes' if alt_has_zero_reject_path else 'no',
                     ','.join(alt_accept_paths) if alt_accept_paths else '-',
-                    _format_alt_rows(alt_rows))
+                    _format_alt_rows(alt_rows)))
             else:
                 alt_accept_paths = []
                 alt_has_zero_reject_path = False
@@ -1081,13 +1084,13 @@ class StratumRPCMiningProvider(object):
                     drift=drift,
                     version_bits=(version_bits or ''),
                     notify_hex_le=bool(NOTIFY_HEX_LE),
-                    extranonce1_hex=self._extranonce1.encode('hex'),
+                    extranonce1_hex=self._extranonce1.hex(),
                     extranonce2_hex=extranonce2,
-                    coinbase_nonce_hex=coinb_nonce.encode('hex'),
+                    coinbase_nonce_hex=coinb_nonce.hex(),
                     prevhash_hex='%064x' % x['previous_block'],
-                    merkle_branch_hex=[pack.IntType(256).pack(s).encode('hex') for s in x['merkle_link']['branch']],
-                    coinb1_hex=x['coinb1'].encode('hex'),
-                    coinb2_hex=x['coinb2'].encode('hex'),
+                    merkle_branch_hex=[pack.IntType(256).pack(s).hex() for s in x['merkle_link']['branch']],
+                    coinb1_hex=x['coinb1'].hex(),
+                    coinb2_hex=x['coinb2'].hex(),
                     ntime_hex=ntime,
                     nonce_hex=nonce,
                     header_version=nversion,
@@ -1108,7 +1111,7 @@ class StratumRPCMiningProvider(object):
             if REJECT_ALT_PATHS_LOG or REJECT_DUMP_PATH:
                 _reject_diag_count[0] += 1
                 if _reject_diag_count[0] == REJECT_DUMP_LIMIT:
-                    print 'STRATUM: reject diagnostics budget exhausted (%d rejects); skipping further dumps' % REJECT_DUMP_LIMIT
+                    print('STRATUM: reject diagnostics budget exhausted (%d rejects); skipping further dumps' % REJECT_DUMP_LIMIT)
 
         # adjust difficulty on this stratum to target ~10sec/pseudoshare.
         # Only ACCEPTED shares feed vardiff samples — rejected (hash > target)
@@ -1127,7 +1130,7 @@ class StratumRPCMiningProvider(object):
                 self.target = int(self.target * clip((time.time() - old_time)/(len(self.recent_shares)*self.share_rate), 1.0/VARDIFF_CLIP, VARDIFF_CLIP) + 0.5)
                 newtarget = clip(self.target, self.wb.net.SANE_TARGET_RANGE[0], self.wb.net.SANE_TARGET_RANGE[1])
                 if newtarget != self.target:
-                    print "Clipping target from %064x to %064x" % (self.target, newtarget)
+                    print("Clipping target from %064x to %064x" % (self.target, newtarget))
                     self.target = newtarget
                 self.target = max(x['min_share_target'], self.target)
                 self.recent_shares = [time.time()]
@@ -1182,8 +1185,8 @@ class StratumProtocol(jsonrpc.LineBasedPeer):
         if TRACE:
             try:
                 peer = self.transport.getPeer()
-                print '[STRATUM_TRACE] %s [%s:%d] [-] == TCP_CONNECT' % (
-                    _ts(), peer.host, peer.port)
+                print('[STRATUM_TRACE] %s [%s:%d] [-] == TCP_CONNECT' % (
+                    _ts(), peer.host, peer.port))
             except Exception:
                 pass
 
@@ -1197,9 +1200,9 @@ class StratumProtocol(jsonrpc.LineBasedPeer):
                 # ConnectionDone, ConnectionLost, RST) — exactly the field
                 # we want to disambiguate "miner sent FIN" vs "we hit a
                 # protocol error" vs "TCP RST from middlebox".
-                print '[STRATUM_TRACE] %s [%s:%d] [%s] == TCP_DISCONNECT reason=%r' % (
+                print('[STRATUM_TRACE] %s [%s:%d] [%s] == TCP_DISCONNECT reason=%r' % (
                     _ts(), peer.host, peer.port, who,
-                    getattr(reason, 'value', reason))
+                    getattr(reason, 'value', reason)))
             except Exception:
                 pass
         if getattr(svc, 'address', None) is not None:

@@ -18,7 +18,7 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 # THE SOFTWARE.
 
-from math import convertbits
+from .math import convertbits
 
 CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
 
@@ -118,7 +118,7 @@ def valid_version(data):
     # Bit six is a multiplier
     if ver & 4:
         bits *= 2
-    if (len(converted) - 1) != (bits / 8):
+    if (len(converted) - 1) != (bits // 8):
         return False
     return True
 
@@ -166,10 +166,16 @@ def encode(prefix, ver, data):
     ver <<= 3
     dlen = 0
     tmp = len(data) * 8
+    # NOTE: these three divisions were bare '/' under Python 2, i.e. floor
+    # division. This module deliberately does NOT use
+    # `from __future__ import division`, so under Python 3 they would become
+    # true division: `ver += dlen` would make `ver` a float, `convertbits`
+    # would then produce garbage, and every CashAddr encode() would fail
+    # silently. They are spelled `//` to preserve the original semantics.
     if tmp > 256:
         dlen ^= 0x04
-        tmp /= 2
-    dlen += (tmp - 160) / 32
+        tmp //= 2
+    dlen += (tmp - 160) // 32
     ver += dlen
     bits = convertbits([ver] + data, 8, 5)
     ret = assemble(prefix, bits)

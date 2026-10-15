@@ -6,6 +6,7 @@ import weakref
 from collections import OrderedDict
 
 from twisted.internet import defer
+from twisted.internet.task import deferLater
 from twisted.protocols import basic
 from twisted.python import failure, log
 from twisted.web import client, error
@@ -26,7 +27,7 @@ from p2pool.util import deferral, deferred_resource, memoize
 # intentionally global since strict miners check both directions.
 _LEGACY_JSONRPC = os.environ.get('STRATUM_LEGACY_JSONRPC', '').strip().lower() in ('1', 'true', 'yes', 'on')
 if _LEGACY_JSONRPC:
-    print 'STRATUM: JSON-RPC 1.0 wire format ENABLED (no "jsonrpc": "2.0" field) via STRATUM_LEGACY_JSONRPC'
+    print('STRATUM: JSON-RPC 1.0 wire format ENABLED (no "jsonrpc": "2.0" field) via STRATUM_LEGACY_JSONRPC')
 
 def _frame_response(id_, result, error):
     """Build the JSON for an outgoing JSON-RPC response, honouring the
@@ -140,7 +141,7 @@ def _handle(data, provider, preargs=(), response_handler=None):
                 
                 id_ = req.get('id', None)
                 method = req.get('method', None)
-                if not isinstance(method, basestring):
+                if not isinstance(method, str):
                     raise Error_for_code(-32600)(u'Invalid Request')
                 params = req.get('params', [])
                 if not isinstance(params, list):
@@ -162,7 +163,7 @@ def _handle(data, provider, preargs=(), response_handler=None):
             except Exception:
                 log.err(None, 'Squelched JSON error:')
                 raise Error_for_code(-32099)(u'Unknown error')
-        except Error, e:
+        except Error as e:
             result = None
             error = e._to_obj()
         
@@ -170,12 +171,89 @@ def _handle(data, provider, preargs=(), response_handler=None):
 
 # HTTP
 
+def get_page(url, method='GET', headers=None, postdata=None, timeout=None):
+    """Replacement for the removed twisted.web.client.getPage (Twisted 21+).
+
+    getPage was removed in Twisted 21; Agent + readBody is the documented
+    replacement. Differences that matter here:
+      - the URL and method must be bytes (Agent takes bytes, so encode below)
+      - headers are a str -> [str] mapping; Headers normalises to bytes itself
+      - the body must be an IBodyProducer, not raw bytes. Agent stores the
+        argument as bodyProducer and later reads .length off it, so passing
+        bytes raises "'bytes' object has no attribute 'length'".
+      - readBody takes the *Response*, not the request Deferred, so it has to
+        be chained off the request rather than handed the Deferred.
+      - getPage returned str; readBody returns bytes. We decode to str so
+        every existing caller (json.loads, logging) keeps working.
+    Returns a Deferred firing with the response body as str.
+    """
+    from twisted.web.client import Agent, FileBodyProducer, readBody
+    from twisted.web.http_headers import Headers
+    from twisted.internet import reactor
+    from io import BytesIO
+    hdrs = {}
+    for k, v in (headers or {}).items():
+        if isinstance(k, bytes):
+            k = k.decode('utf-8')
+        if isinstance(v, bytes):
+            v = v.decode('utf-8')
+        hdrs[k] = [v]
+    body = None
+    if postdata is not None:
+        raw = postdata.encode('utf-8') if isinstance(postdata, str) else postdata
+        body = FileBodyProducer(BytesIO(raw))
+    agent = Agent(reactor)
+    req = agent.request(method.encode('utf-8'), url.encode('utf-8'),
+                        Headers(hdrs), body)
+    # getPage raised web Error on non-2xx; readBody does not. bitcoind
+    # answers submitblock with HTTP 500 + a valid JSON-RPC error body, so
+    # without this the body would take the json.loads success path and the
+    # real -22 would surface as JSONDecodeError.
+    #
+    # The status rides the callback channel as (code, body): consumeErrors
+    # in the DeferredList below swallows *errbacks*, so raising here would
+    # be turned into a bogus TimeoutError. _http_do rebuilds error.Error
+    # from it (twisted stores the status in .status and the body in
+    # .response, not .code/.message).
+    def _check_status(resp):
+        def _tag(body):
+            return resp.code, body
+        return readBody(resp).addCallback(_tag)
+    d = req.addCallback(_check_status)
+    if timeout is not None:
+        d = defer.DeferredList([d, deferLater(reactor, timeout, lambda: None)],
+                               fireOnOneCallback=True, consumeErrors=True)
+        def _first(results):
+            # fireOnOneCallback fires with (result, index), NOT a list of
+            # (succeeded, result) tuples; only the all-done path is a list.
+            # consumeErrors turns a failed request into (None, 0) and the
+            # timer into (None, 1), so distinguish by index, then re-raise
+            # the real failure rather than reporting a bogus timeout.
+            if not results:
+                raise defer.TimeoutError()
+            result, index = results
+            if index == 1:
+                raise defer.TimeoutError()  # timer won: real request pending
+            return result
+        d.addCallback(_first)
+    # (code, body) -> str body; non-2xx becomes error.Error so _http_do's
+    # except clause can decode the JSON-RPC error out of it.
+    def _decode(tagged):
+        if isinstance(tagged, tuple):
+            code, body = tagged
+            if code < 200 or code >= 300:
+                raise error.Error(code, None, body)
+            tagged = body
+        return tagged.decode('utf-8', 'replace') if isinstance(tagged, bytes) else tagged
+    return d.addCallback(_decode)
+
+
 @defer.inlineCallbacks
 def _http_do(url, headers, timeout, method, params):
     id_ = 0
     
     try:
-        data = yield client.getPage(
+        data = yield get_page(
             url=url,
             method='POST',
             headers=dict(headers, **{'Content-Type': 'application/json'}),
@@ -187,7 +265,7 @@ def _http_do(url, headers, timeout, method, params):
             }),
             timeout=timeout,
         )
-    except error.Error, e:
+    except error.Error as e:
         try:
             resp = json.loads(e.response)
         except:
@@ -212,16 +290,23 @@ class HTTPServer(deferred_resource.DeferredResource):
         data = yield _handle(request.content.read(), self._provider, preargs=[request])
         assert data is not None
         request.setHeader('Content-Type', 'application/json')
-        request.setHeader('Content-Length', len(data))
-        request.write(data)
+        raw = data.encode('utf-8') if isinstance(data, str) else data
+        # twisted 24 Request.write is bytes-only; setHeader value too
+        request.setHeader(b'Content-Length', str(len(raw)))
+        request.write(raw)
 
 class LineBasedPeer(basic.LineOnlyReceiver):
-    delimiter = '\n'
+    delimiter = b'\n'
+    
+    def _send_line(self, line):
+        # _frame_response/_frame_request return str; LineOnlyReceiver.sendLine
+        # goes straight to transport.write(), which is bytes-only under py3.
+        self.sendLine(line.encode('utf-8') if isinstance(line, str) else line)
     
     def __init__(self):
         #basic.LineOnlyReceiver.__init__(self)
-        self._matcher = deferral.GenericDeferrer(max_id=2**30, func=lambda id, method, params: self.sendLine(_frame_request(id, method, params)))
+        self._matcher = deferral.GenericDeferrer(max_id=2**30, func=lambda id, method, params: self._send_line(_frame_request(id, method, params)))
         self.other = Proxy(self._matcher)
     
     def lineReceived(self, line):
-        _handle(line, self, response_handler=self._matcher.got_response).addCallback(lambda line2: self.sendLine(line2) if line2 is not None else None)
+        _handle(line, self, response_handler=self._matcher.got_response).addCallback(lambda line2: self._send_line(line2) if line2 is not None else None)

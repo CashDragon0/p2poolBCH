@@ -19,7 +19,7 @@ def process(state, chunk):
         return (x >> n) | (x << 32 - n) % 2**32
     
     w = list(struct.unpack('>16I', chunk))
-    for i in xrange(16, 64):
+    for i in range(16, 64):
         s0 = rightrotate(w[i-15], 7) ^ rightrotate(w[i-15], 18) ^ (w[i-15] >> 3)
         s1 = rightrotate(w[i-2], 17) ^ rightrotate(w[i-2], 19) ^ (w[i-2] >> 10)
         w.append((w[i-16] + s0 + w[i-7] + s1) % 2**32)
@@ -42,7 +42,7 @@ class sha256(object):
     digest_size = 256//8
     block_size = 512//8
     
-    def __init__(self, data='', _=(initial_state, '', 0)):
+    def __init__(self, data=b'', _=(initial_state, b'', 0)):
         self.state, self.buf, self.length = _
         self.update(data)
     
@@ -50,7 +50,7 @@ class sha256(object):
         state = self.state
         buf = self.buf + data
         
-        chunks = [buf[i:i + self.block_size] for i in xrange(0, len(buf) + 1, self.block_size)]
+        chunks = [buf[i:i + self.block_size] for i in range(0, len(buf) + 1, self.block_size)]
         for chunk in chunks[:-1]:
             state = process(state, chunk)
         
@@ -59,17 +59,17 @@ class sha256(object):
         
         self.length += 8*len(data)
     
-    def copy(self, data=''):
+    def copy(self, data=b''):
         return self.__class__(data, (self.state, self.buf, self.length))
     
     def digest(self):
         state = self.state
-        buf = self.buf + '\x80' + '\x00'*((self.block_size - 9 - len(self.buf)) % self.block_size) + struct.pack('>Q', self.length)
+        buf = self.buf + b'\x80' + b'\x00'*((self.block_size - 9 - len(self.buf)) % self.block_size) + struct.pack('>Q', self.length)
         
-        for chunk in [buf[i:i + self.block_size] for i in xrange(0, len(buf), self.block_size)]:
+        for chunk in [buf[i:i + self.block_size] for i in range(0, len(buf), self.block_size)]:
             state = process(state, chunk)
         
         return state
     
     def hexdigest(self):
-        return self.digest().encode('hex')
+        return self.digest().hex()

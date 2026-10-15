@@ -20,7 +20,13 @@
 # THE SOFTWARE.
 
 import unittest
-import mock
+try:
+    import mock
+except ImportError:  # py3: no standalone mock package; use stdlib backport
+    import sys
+    from unittest import mock as _mock
+    sys.modules['mock'] = _mock
+    import mock
 
 from p2pool.util import cash_addr
 from p2pool.bitcoin import data
@@ -368,7 +374,8 @@ class IntegrationTest(unittest.TestCase):
 
     @staticmethod
     def to_byte_array(data):
-        return [ord(x) for x in data]
+        # py3: iterating bytes already yields ints
+        return list(data)
 
     def test_old_and_new_addresses_match(self):
         for oaddr, naddr in self.OLD_NEW_ADDRESS:

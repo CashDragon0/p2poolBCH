@@ -1,6 +1,6 @@
 from __future__ import division
 
-import StringIO
+import io
 import json
 import random
 import sys
@@ -42,14 +42,27 @@ class WorkerInterface(object):
         
         self.merkle_root_to_handler = expiring_dict.ExpiringDict(300)
     
+    @staticmethod
+    def _user_str(request):
+        # twisted 24 getUser() returns bytes (latin-1); twisted 18 on py2
+        # returned str or None. work.get_user_details needs str.
+        user = request.getUser()
+        if user is None:
+            return ''
+        if isinstance(user, bytes):
+            return user.decode('latin-1')
+        return user
+    
     def attach_to(self, res, get_handler=None):
-        res.putChild('', _GETableServer(_Provider(self, long_poll=False), get_handler))
+        # py3 twisted requires bytes path segments (same class as web.py's
+        # putChild fixes; these two were the only str leftovers)
+        res.putChild(b'', _GETableServer(_Provider(self, long_poll=False), get_handler))
         
         def repost(request):
-            request.content = StringIO.StringIO(json.dumps(dict(id=0, method='getwork')))
+            request.content = io.BytesIO(json.dumps(dict(id=0, method='getwork')).encode('utf-8'))
             return s.render_POST(request)
         s = _GETableServer(_Provider(self, long_poll=True), repost)
-        res.putChild('long-polling', s)
+        res.putChild(b'long-polling', s)
     
     @defer.inlineCallbacks
     def _getwork(self, request, data, long_poll):
@@ -62,30 +75,31 @@ class WorkerInterface(object):
         if data is not None:
             header = getwork.decode_data(data)
             if header['merkle_root'] not in self.merkle_root_to_handler:
-                print >>sys.stderr, '''Couldn't link returned work's merkle root with its handler. This should only happen if this process was recently restarted!'''
+                print('''Couldn't link returned work's merkle root with its handler. This should only happen if this process was recently restarted!''', file=sys.stderr)
                 defer.returnValue(False)
-            defer.returnValue(self.merkle_root_to_handler[header['merkle_root']](header, request.getUser() if request.getUser() is not None else '', '\0'*self.worker_bridge.COINBASE_NONCE_LENGTH))
+            defer.returnValue(self.merkle_root_to_handler[header['merkle_root']](header, self._user_str(request), b'\0'*self.worker_bridge.COINBASE_NONCE_LENGTH))
         
         if p2pool.DEBUG:
             id = random.randrange(1000, 10000)
-            print 'POLL %i START is_long_poll=%r user_agent=%r user=%r' % (id, long_poll, request.getHeader('User-Agent'), request.getUser())
+            print('POLL %i START is_long_poll=%r user_agent=%r user=%r' % (id, long_poll, request.getHeader('User-Agent'), self._user_str(request)))
         
         if long_poll:
             request_id = request.getClientIP(), request.getHeader('Authorization')
             if self.worker_views.get(request_id, self.worker_bridge.new_work_event.times) != self.worker_bridge.new_work_event.times:
                 if p2pool.DEBUG:
-                    print 'POLL %i PUSH' % (id,)
+                    print('POLL %i PUSH' % (id,))
             else:
                 if p2pool.DEBUG:
-                    print 'POLL %i WAITING' % (id,)
+                    print('POLL %i WAITING' % (id,))
                 yield self.worker_bridge.new_work_event.get_deferred()
             self.worker_views[request_id] = self.worker_bridge.new_work_event.times
         
-        x, handler = self.worker_bridge.get_work(*self.worker_bridge.preprocess_request(request.getUser() if request.getUser() is not None else ''))
+        pre = self.worker_bridge.preprocess_request(self._user_str(request))
+        x, handler = self.worker_bridge.get_work(*pre)
         res = getwork.BlockAttempt(
             version=x['version'],
             previous_block=x['previous_block'],
-            merkle_root=bitcoin_data.check_merkle_link(bitcoin_data.hash256(x['coinb1'] + '\0'*self.worker_bridge.COINBASE_NONCE_LENGTH + x['coinb2']), x['merkle_link']),
+            merkle_root=bitcoin_data.check_merkle_link(bitcoin_data.hash256(x['coinb1'] + b'\0'*self.worker_bridge.COINBASE_NONCE_LENGTH + x['coinb2']), x['merkle_link']),
             timestamp=x['timestamp'],
             bits=x['bits'],
             share_target=x['share_target'],
@@ -95,7 +109,7 @@ class WorkerInterface(object):
         self.merkle_root_to_handler[res.merkle_root] = handler
         
         if p2pool.DEBUG:
-            print 'POLL %i END identifier=%i' % (id, self.worker_bridge.new_work_event.times)
+            print('POLL %i END identifier=%i' % (id, self.worker_bridge.new_work_event.times))
         
         extra_params = {}
         if request.getHeader('User-Agent') == 'Jephis PIC Miner':
@@ -136,7 +150,11 @@ class CachingWorkerBridge(object):
         
         res = (
             dict(x, coinb1=x['coinb1'] + pack.IntType(self._my_bits).pack(nonce)),
-            lambda header, user, coinbase_nonce, pseudoshare_target: handler(header, user, pack.IntType(self._my_bits).pack(nonce) + coinbase_nonce, pseudoshare_target),
+            # 2bcdd45 added the 4th (pseudoshare_target) arg for stratum but
+            # never updated the getwork-submit call site, which passes 3
+            # args. Default it to the target this work advertised to the
+            # miner so getwork submits work again.
+            lambda header, user, coinbase_nonce, pseudoshare_target=None: handler(header, user, pack.IntType(self._my_bits).pack(nonce) + coinbase_nonce, x['share_target'] if pseudoshare_target is None else pseudoshare_target),
         )
         
         if nonce + 1 != 2**self._my_bits:

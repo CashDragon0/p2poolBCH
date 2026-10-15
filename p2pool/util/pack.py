@@ -1,6 +1,6 @@
 import binascii
 import struct
-import cStringIO as StringIO
+import io
 import os
 
 import p2pool
@@ -28,7 +28,7 @@ class Type(object):
             try:
                 rval = self._hash = hash((type(self), frozenset(self.__dict__.items())))
             except:
-                print self.__dict__
+                print(self.__dict__)
                 raise
         return rval
     
@@ -45,13 +45,13 @@ class Type(object):
         return obj
     
     def _pack(self, obj):
-        f = StringIO.StringIO()
+        f = io.BytesIO()
         self.write(f, obj)
         return f.getvalue()
     
     def unpack(self, data, ignore_trailing=False):
-        if not type(data) == StringIO.InputType:
-            data = StringIO.StringIO(data)
+        if not isinstance(data, io.BytesIO):
+            data = io.BytesIO(data)
         obj = self._unpack(data, ignore_trailing)
         
         if p2pool.DEBUG:
@@ -82,7 +82,7 @@ class Type(object):
 class VarIntType(Type):
     def read(self, file):
         data = file.read(1)
-        first = ord(data)
+        first = data[0]
         if first < 0xfd:
             return first
         if first == 0xfd:
@@ -119,6 +119,11 @@ class VarStrType(Type):
         return file.read(length)
     
     def write(self, file, item):
+        if isinstance(item, str):
+            # py2 wrote str straight to the wire; under py3 the wire needs
+            # bytes.  Encode before the length prefix so it counts bytes
+            # rather than characters.
+            item = item.encode('utf-8')
         self._inner_size.write(file, len(item))
         file.write(item)
 
@@ -133,7 +138,7 @@ class EnumType(Type):
         self.tolerant = tolerant
 
         self.unpack_to_pack = {}
-        for k, v in pack_to_unpack.iteritems():
+        for k, v in pack_to_unpack.items():
             if v in self.unpack_to_pack:
                 raise ValueError('duplicate value in pack_to_unpack')
             self.unpack_to_pack[v] = k
@@ -148,7 +153,7 @@ class EnumType(Type):
 
     def write(self, file, item):
         if item not in self.unpack_to_pack:
-            if self.tolerant and isinstance(item, (int, long)):
+            if self.tolerant and isinstance(item, (int,)):
                 self.inner.write(file, item)
                 return
             raise ValueError('enum item (%r) not in unpack_to_pack (%r)' % (item, self.unpack_to_pack))
@@ -164,7 +169,7 @@ class ListType(Type):
     def read(self, file):
         length = self._inner_size.read(file)
         length *= self.mul
-        res = [self.type.read(file) for i in xrange(length)]
+        res = [self.type.read(file) for i in range(length)]
         return res
     
     def write(self, file, item):
@@ -197,7 +202,11 @@ class IntType(Type):
         if bits in [8, 16, 32, 64]:
             return StructType(('<' if endianness == 'little' else '>') + {8: 'B', 16: 'H', 32: 'I', 64: 'Q'}[bits])
         else:
-            return Type.__new__(cls, bits, endianness)
+            # Python 2's object.__new__ silently ignored excess arguments;
+            # Python 3's raises TypeError. __init__ does all the real work via
+            # __slots__, so pass nothing. IntType(256) is on the hot path --
+            # it serialises every share hash and merkle root.
+            return object.__new__(cls)
     
     def __init__(self, bits, endianness='little'):
         assert bits % 8 == 0
@@ -223,18 +232,18 @@ class IntType(Type):
 class IPV6AddressType(Type):
     def read(self, file):
         data = file.read(16)
-        if data[:12] == '00000000000000000000ffff'.decode('hex'):
-            return '.'.join(str(ord(x)) for x in data[12:])
-        return ':'.join(data[i*2:(i+1)*2].encode('hex') for i in xrange(8))
+        if data[:12] == bytes.fromhex('00000000000000000000ffff'):
+            return '.'.join(str(x) for x in data[12:])
+        return ':'.join(data[i*2:(i+1)*2].hex() for i in range(8))
     
     def write(self, file, item):
         if ':' in item:
-            data = ''.join(item.replace(':', '')).decode('hex')
+            data = bytes.fromhex(item.replace(':', ''))
         else:
-            bits = map(int, item.split('.'))
+            bits = [int(x) for x in item.split('.')]
             if len(bits) != 4:
                 raise ValueError('invalid address: %r' % (bits,))
-            data = '00000000000000000000ffff'.decode('hex') + ''.join(chr(x) for x in bits)
+            data = bytes.fromhex('00000000000000000000ffff') + bytes(bits)
         assert len(data) == 16, len(data)
         file.write(data)
 
@@ -317,6 +326,8 @@ class FixedStrType(Type):
         return file.read(self.length)
     
     def write(self, file, item):
+        if isinstance(item, str):
+            item = item.encode('utf-8') # see VarStrType.write
         if len(item) != self.length:
             raise ValueError('incorrect length item!')
         file.write(item)

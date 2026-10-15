@@ -20,7 +20,7 @@
 
 """Reference implementation for Bech32 and segwit addresses."""
 
-from math import convertbits
+from .math import convertbits
 
 CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
 

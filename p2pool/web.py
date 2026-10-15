@@ -12,26 +12,43 @@ from twisted.python import log
 from twisted.web import resource, static
 
 import p2pool
-from bitcoin import data as bitcoin_data, helper as bitcoin_helper
+from .bitcoin import data as bitcoin_data, helper as bitcoin_helper
 from . import data as p2pool_data, p2p
-from util import deferral, deferred_resource, graph, math, memory, pack, variable
+from .util import deferral, deferred_resource, graph, math, memory, pack, variable
+
+@defer.inlineCallbacks
+def _peer_ping_ms(peer):
+    """Best (lowest) round-trip of 3 pings, in ms.
+
+    Was a 'yield' inside a list comprehension, which Python 3 rejects. The
+    generator now collects the samples explicitly; behaviour is identical.
+    """
+    samples = []
+    for _ in range(3):
+        samples.append((yield peer.do_ping()
+                        .addCallback(lambda x: x/0.001)
+                        .addErrback(lambda fail: None)))
+    defer.returnValue(min(samples))
+
 
 def _atomic_read(filename):
     try:
         with open(filename, 'rb') as f:
             return f.read()
-    except IOError, e:
+    except IOError as e:
         if e.errno != errno.ENOENT:
             raise
     try:
         with open(filename + '.new', 'rb') as f:
             return f.read()
-    except IOError, e:
+    except IOError as e:
         if e.errno != errno.ENOENT:
             raise
     return None
 
 def _atomic_write(filename, data):
+    if not isinstance(data, bytes):
+        data = data.encode('utf-8')
     with open(filename + '.new', 'wb') as f:
         f.write(data)
         f.flush()
@@ -75,8 +92,8 @@ def get_web_root(wb, datadir_path, bitcoind_getinfo_var, stop_event=variable.Eve
     
     def get_current_scaled_txouts(scale, trunc=0):
         txouts = node.get_current_txouts()
-        total = sum(txouts.itervalues())
-        results = dict((addr, value*scale//total) for addr, value in txouts.iteritems())
+        total = sum(txouts.values())
+        results = dict((addr, value*scale//total) for addr, value in txouts.items())
         if trunc > 0:
             total_random = 0
             random_set = set()
@@ -90,8 +107,8 @@ def get_web_root(wb, datadir_path, bitcoind_getinfo_var, stop_event=variable.Eve
                 for addr in random_set:
                     del results[addr]
                 results[winner] = total_random
-        if sum(results.itervalues()) < int(scale):
-            results[math.weighted_choice(results.iteritems())] += int(scale) - sum(results.itervalues())
+        if sum(results.values()) < int(scale):
+            results[math.weighted_choice(results.items())] += int(scale) - sum(results.values())
         return results
     
     def get_patron_sendmany(total=None, trunc='0.01'):
@@ -101,7 +118,7 @@ def get_web_root(wb, datadir_path, bitcoind_getinfo_var, stop_event=variable.Eve
         trunc = int(float(trunc)*1e8)
         return json.dumps(dict(
             (bitcoin_data.script2_to_address(script, node.net.PARENT), value/1e8)
-            for script, value in get_current_scaled_txouts(total, trunc).iteritems()
+            for script, value in get_current_scaled_txouts(total, trunc).items()
             if bitcoin_data.script2_to_address(script, node.net.PARENT) is not None
         ))
     
@@ -178,8 +195,8 @@ def get_web_root(wb, datadir_path, bitcoind_getinfo_var, stop_event=variable.Eve
             efficiency_if_miner_perfect=(1 - stale_orphan_shares/shares)/(1 - global_stale_prop) if shares else None, # ignores dead shares because those are miner's fault and indicated by pseudoshare rejection
             efficiency=(1 - (stale_orphan_shares+stale_doa_shares)/shares)/(1 - global_stale_prop) if shares else None,
             peers=dict(
-                incoming=sum(1 for peer in node.p2p_node.peers.itervalues() if peer.incoming),
-                outgoing=sum(1 for peer in node.p2p_node.peers.itervalues() if not peer.incoming),
+                incoming=sum(1 for peer in node.p2p_node.peers.values() if peer.incoming),
+                outgoing=sum(1 for peer in node.p2p_node.peers.values() if not peer.incoming),
             ),
             shares=dict(
                 total=shares,
@@ -206,6 +223,9 @@ def get_web_root(wb, datadir_path, bitcoind_getinfo_var, stop_event=variable.Eve
             self.func, self.mime_type, self.args = func, mime_type, args
         
         def getChild(self, child, request):
+            # Twisted passes path segments as bytes under py3; handlers take text.
+            if type(child) is not type(''):
+                child = child.decode('utf-8', 'replace')
             return WebInterface(self.func, self.mime_type, self.args + (child,))
         
         @defer.inlineCallbacks
@@ -217,19 +237,19 @@ def get_web_root(wb, datadir_path, bitcoind_getinfo_var, stop_event=variable.Eve
     
     def decent_height():
         return min(node.tracker.get_height(node.best_share_var.value), 720)
-    web_root.putChild('rate', WebInterface(lambda: p2pool_data.get_pool_attempts_per_second(node.tracker, node.best_share_var.value, decent_height())/(1-p2pool_data.get_average_stale_prop(node.tracker, node.best_share_var.value, decent_height()))))
-    web_root.putChild('difficulty', WebInterface(lambda: bitcoin_data.target_to_difficulty(node.tracker.items[node.best_share_var.value].max_target)))
-    web_root.putChild('users', WebInterface(get_users))
-    web_root.putChild('user_stales', WebInterface(lambda:
+    web_root.putChild(b'rate', WebInterface(lambda: p2pool_data.get_pool_attempts_per_second(node.tracker, node.best_share_var.value, decent_height())/(1-p2pool_data.get_average_stale_prop(node.tracker, node.best_share_var.value, decent_height()))))
+    web_root.putChild(b'difficulty', WebInterface(lambda: bitcoin_data.target_to_difficulty(node.tracker.items[node.best_share_var.value].max_target)))
+    web_root.putChild(b'users', WebInterface(get_users))
+    web_root.putChild(b'user_stales', WebInterface(lambda:
         p2pool_data.get_user_stale_props(node.tracker, node.best_share_var.value,
             node.tracker.get_height(node.best_share_var.value), node.net.PARENT)))
-    web_root.putChild('fee', WebInterface(lambda: wb.worker_fee))
-    web_root.putChild('current_payouts', WebInterface(lambda: dict(
+    web_root.putChild(b'fee', WebInterface(lambda: wb.worker_fee))
+    web_root.putChild(b'current_payouts', WebInterface(lambda: dict(
         (address, value/1e8) for address, value
-            in node.get_current_txouts().iteritems())))
-    web_root.putChild('patron_sendmany', WebInterface(get_patron_sendmany, 'text/plain'))
-    web_root.putChild('global_stats', WebInterface(get_global_stats))
-    web_root.putChild('local_stats', WebInterface(get_local_stats))
+            in node.get_current_txouts().items())))
+    web_root.putChild(b'patron_sendmany', WebInterface(get_patron_sendmany, 'text/plain'))
+    web_root.putChild(b'global_stats', WebInterface(get_global_stats))
+    web_root.putChild(b'local_stats', WebInterface(get_local_stats))
 
     # ==== Version Signaling ====
     def get_version_signaling():
@@ -244,11 +264,11 @@ def get_web_root(wb, datadir_path, bitcoind_getinfo_var, stop_event=variable.Eve
             counts = p2pool_data.get_desired_version_counts(node.tracker, node.best_share_var.value, lookbehind)
         except:
             counts = {}
-        total_weight = sum(counts.itervalues())
+        total_weight = sum(counts.values())
         if total_weight == 0:
             return None
         version_percentages = {}
-        for version, weight in counts.iteritems():
+        for version, weight in counts.items():
             version_percentages[str(version)] = {
                 'weight': weight,
                 'percentage': (weight / total_weight) * 100
@@ -309,7 +329,7 @@ def get_web_root(wb, datadir_path, bitcoind_getinfo_var, stop_event=variable.Eve
             show_transition=False,  # BCH: no pending transition
             status='no_transition',
         )
-    web_root.putChild('version_signaling', WebInterface(get_version_signaling))
+    web_root.putChild(b'version_signaling', WebInterface(get_version_signaling))
 
     # ==== Stratum Stats (BCH: uses local rates since no pool_stats module) ====
     def get_stratum_stats():
@@ -318,7 +338,7 @@ def get_web_root(wb, datadir_path, bitcoind_getinfo_var, stop_event=variable.Eve
             formatted_workers = {}
             # Include workers with live connections that submitted a share within the rate-monitor window
             _rate_window = 10 * 60  # must match local_rate_monitor window
-            for worker_name, info in wb.connected_workers.iteritems():
+            for worker_name, info in wb.connected_workers.items():
                 if worker_name not in miner_hash_rates:
                     last_diff = info.get('last_diff', 0)
                     if not last_diff:
@@ -353,7 +373,7 @@ def get_web_root(wb, datadir_path, bitcoind_getinfo_var, stop_event=variable.Eve
                         'merged_redistributed': False,
                         'merged_reverse_converted': False,
                     }
-            for worker_name, hr in miner_hash_rates.iteritems():
+            for worker_name, hr in miner_hash_rates.items():
                 # Surface every worker that has rate-monitor work in the last
                 # 10 min, even if their TCP socket is momentarily between
                 # reconnects.  ASIC firmware (Antminer/Bitaxe/Braiins) flaps
@@ -397,14 +417,14 @@ def get_web_root(wb, datadir_path, bitcoind_getinfo_var, stop_event=variable.Eve
             # count to that worker's most-recent peer IP.
             ip_connections = {}
             ip_workers_map = {}
-            for wname, info in wb.connected_workers.iteritems():
+            for wname, info in wb.connected_workers.items():
                 ip = info.get('ip', 'unknown')
                 ip_connections[ip] = ip_connections.get(ip, 0) + info.get('conn_count', 1)
                 if ip not in ip_workers_map:
                     ip_workers_map[ip] = set()
                 ip_workers_map[ip].add(wname)
-            ip_workers = {ip: len(workers) for ip, workers in ip_workers_map.iteritems()}
-            total_sockets = sum(info.get('conn_count', 1) for info in wb.connected_workers.itervalues())
+            ip_workers = {ip: len(workers) for ip, workers in ip_workers_map.items()}
+            total_sockets = sum(info.get('conn_count', 1) for info in wb.connected_workers.values())
 
             # Submission rate: shares per second over last ~50 pseudoshares
             now = time.time()
@@ -423,7 +443,7 @@ def get_web_root(wb, datadir_path, bitcoind_getinfo_var, stop_event=variable.Eve
                     'connections': total_sockets,
                     'workers': len(formatted_workers),
                     'total_workers': len(formatted_workers),
-                    'total_hash_rate': sum(miner_hash_rates.itervalues()),
+                    'total_hash_rate': sum(miner_hash_rates.values()),
                     'total_accepted': total_accepted,
                     'total_rejected': total_rejected,
                     'submission_rate': submission_rate,
@@ -439,7 +459,7 @@ def get_web_root(wb, datadir_path, bitcoind_getinfo_var, stop_event=variable.Eve
             }
         except Exception as e:
             return {'error': str(e), 'workers': {}}
-    web_root.putChild('stratum_stats', WebInterface(get_stratum_stats))
+    web_root.putChild(b'stratum_stats', WebInterface(get_stratum_stats))
 
     def get_stratum_security():
         now = time.time()
@@ -449,7 +469,7 @@ def get_web_root(wb, datadir_path, bitcoind_getinfo_var, stop_event=variable.Eve
         burst_ratio = (rate_10s / rate_60s) if rate_60s > 0 else 1.0
 
         suspicious = []
-        for wname, ws in wb.worker_shares.iteritems():
+        for wname, ws in wb.worker_shares.items():
             total = ws.get('accepted', 0) + ws.get('rejected', 0)
             if total > 10 and total > 0 and ws.get('rejected', 0) / float(total) > 0.5:
                 suspicious.append({'name': wname, 'rate': rate_10s})
@@ -470,7 +490,7 @@ def get_web_root(wb, datadir_path, bitcoind_getinfo_var, stop_event=variable.Eve
             'ddos_detected': False,
             'bans': [],
         }
-    web_root.putChild('stratum_security', WebInterface(get_stratum_security))
+    web_root.putChild(b'stratum_security', WebInterface(get_stratum_security))
 
     def get_ban_stats():
         return {
@@ -482,7 +502,7 @@ def get_web_root(wb, datadir_path, bitcoind_getinfo_var, stop_event=variable.Eve
             'total_banned': 0,
             'bans': [],
         }
-    web_root.putChild('ban_stats', WebInterface(get_ban_stats))
+    web_root.putChild(b'ban_stats', WebInterface(get_ban_stats))
 
     def get_connected_miners():
         try:
@@ -501,7 +521,7 @@ def get_web_root(wb, datadir_path, bitcoind_getinfo_var, stop_event=variable.Eve
             return list(addresses)
         except:
             return []
-    web_root.putChild('connected_miners', WebInterface(get_connected_miners))
+    web_root.putChild(b'connected_miners', WebInterface(get_connected_miners))
 
     # ==== Per-miner stats (miner.html) ====
     def get_miner_stats(address):
@@ -513,7 +533,7 @@ def get_web_root(wb, datadir_path, bitcoind_getinfo_var, stop_event=variable.Eve
             # Collect per-address hashrate from all workers matching this address
             total_hr = 0
             total_doa = 0
-            for wname, hr in miner_hash_rates.iteritems():
+            for wname, hr in miner_hash_rates.items():
                 base = wname.split(',')[0].split('+')[0].split('/')[0].split('.')[0].split('_')[0]
                 if base == address:
                     total_hr += hr
@@ -528,7 +548,7 @@ def get_web_root(wb, datadir_path, bitcoind_getinfo_var, stop_event=variable.Eve
 
             # Current payout from share chain (current_txouts keys are address strings)
             payout_sat = 0
-            for addr_key, val in current_payouts.iteritems():
+            for addr_key, val in current_payouts.items():
                 # Normalize: handle both 'bitcoincash:qp...' and 'qp...' formats
                 body = addr_key[len('bitcoincash:'):] if isinstance(addr_key, str) and addr_key.startswith('bitcoincash:') else addr_key
                 if addr_key == address or body == address or 'bitcoincash:' + addr_key == address:
@@ -540,7 +560,7 @@ def get_web_root(wb, datadir_path, bitcoind_getinfo_var, stop_event=variable.Eve
             # Count accepted/rejected shares across all workers for this address
             total_accepted = 0
             total_rejected = 0
-            for wname, ws in wb.worker_shares.iteritems():
+            for wname, ws in wb.worker_shares.items():
                 base = wname.split(',')[0].split('+')[0].split('/')[0].split('.')[0].split('_')[0]
                 if base == address:
                     total_accepted += ws.get('accepted', 0)
@@ -578,7 +598,7 @@ def get_web_root(wb, datadir_path, bitcoind_getinfo_var, stop_event=variable.Eve
             )
         except Exception as e:
             return dict(address=address, active=False, error=str(e))
-    web_root.putChild('miner_stats', WebInterface(get_miner_stats))
+    web_root.putChild(b'miner_stats', WebInterface(get_miner_stats))
 
     def get_miner_payouts(address):
         try:
@@ -591,7 +611,9 @@ def get_web_root(wb, datadir_path, bitcoind_getinfo_var, stop_event=variable.Eve
 
             explorer_prefix = ''
             try:
-                from bitcoin.networks import bitcoincash as bchn
+                # py2 resolved this as an implicit relative import to
+                # p2pool.bitcoin.networks; py3 needs the explicit form.
+                from .bitcoin.networks import bitcoincash as bchn
                 explorer_prefix = getattr(bchn, 'BLOCK_EXPLORER_URL_PREFIX', '')
             except Exception:
                 pass
@@ -605,7 +627,7 @@ def get_web_root(wb, datadir_path, bitcoind_getinfo_var, stop_event=variable.Eve
                     # Use global current payouts as approximation
                     current_payouts = node.get_current_txouts()
                     # current_payouts keys are already address strings (not script bytes)
-                    for addr_key, val in current_payouts.iteritems():
+                    for addr_key, val in current_payouts.items():
                         body = addr_key[len('bitcoincash:'):] if isinstance(addr_key, str) and addr_key.startswith('bitcoincash:') else addr_key
                         if addr_key == address or body == address or 'bitcoincash:' + addr_key == address:
                             share = val / 1e8
@@ -634,9 +656,9 @@ def get_web_root(wb, datadir_path, bitcoind_getinfo_var, stop_event=variable.Eve
             )
         except Exception as e:
             return dict(error=str(e), blocks=[])
-    web_root.putChild('miner_payouts', WebInterface(get_miner_payouts))
+    web_root.putChild(b'miner_payouts', WebInterface(get_miner_payouts))
 
-    web_root.putChild('merged_miner_payouts', WebInterface(lambda address: dict(
+    web_root.putChild(b'merged_miner_payouts', WebInterface(lambda address: dict(
         address=address, payouts=[], merged=[]
     )))
     def get_best_share():
@@ -695,18 +717,18 @@ def get_web_root(wb, datadir_path, bitcoind_getinfo_var, stop_event=variable.Eve
         if median_pct is not None:
             result['median_pct'] = median_pct
         return result
-    web_root.putChild('best_share', WebInterface(get_best_share))
+    web_root.putChild(b'best_share', WebInterface(get_best_share))
 
     # ==== Stub endpoints for dashboard compatibility ====
-    web_root.putChild('v36_status', WebInterface(lambda: None))
-    web_root.putChild('node_info', WebInterface(lambda: dict(
+    web_root.putChild(b'v36_status', WebInterface(lambda: None))
+    web_root.putChild(b'node_info', WebInterface(lambda: dict(
         version=p2pool.__version__,
         protocol_version=p2p.Protocol.VERSION,
         uptime=time.time() - start_time,
     )))
     def get_peer_list():
         result = []
-        for peer in node.p2p_node.peers.itervalues():
+        for peer in node.p2p_node.peers.values():
             host = peer.transport.getPeer().host
             port = peer.transport.getPeer().port
             uptime = time.time() - getattr(peer, 'connect_time', time.time())
@@ -722,7 +744,7 @@ def get_web_root(wb, datadir_path, bitcoind_getinfo_var, stop_event=variable.Eve
                 txpool_size=peer.remembered_txs_size,
             ))
         return result
-    web_root.putChild('peer_list', WebInterface(get_peer_list))
+    web_root.putChild(b'peer_list', WebInterface(get_peer_list))
     def get_luck_stats():
         if node.best_share_var.value is None or node.bitcoind_work.value is None:
             return dict(luck_available=False, current_luck_trend=None, blocks=[])
@@ -760,31 +782,33 @@ def get_web_root(wb, datadir_path, bitcoind_getinfo_var, stop_event=variable.Eve
             return dict(luck_available=True, current_luck_trend=current_luck_trend, blocks=blocks_out)
         except Exception:
             return dict(luck_available=False, current_luck_trend=None, blocks=[])
-    web_root.putChild('luck_stats', WebInterface(get_luck_stats))
-    web_root.putChild('broadcaster_status', WebInterface(bitcoin_helper.get_broadcaster_status))
-    web_root.putChild('merged_broadcaster_status', WebInterface(lambda: None))
-    web_root.putChild('merged_stats', WebInterface(lambda: None))
-    web_root.putChild('recent_merged_blocks', WebInterface(lambda: []))
-    web_root.putChild('discovered_merged_blocks', WebInterface(lambda: []))
-    web_root.putChild('current_merged_payouts', WebInterface(lambda: dict(
+    web_root.putChild(b'luck_stats', WebInterface(get_luck_stats))
+    web_root.putChild(b'broadcaster_status', WebInterface(bitcoin_helper.get_broadcaster_status))
+    web_root.putChild(b'merged_broadcaster_status', WebInterface(lambda: None))
+    web_root.putChild(b'merged_stats', WebInterface(lambda: None))
+    web_root.putChild(b'recent_merged_blocks', WebInterface(lambda: []))
+    web_root.putChild(b'discovered_merged_blocks', WebInterface(lambda: []))
+    web_root.putChild(b'current_merged_payouts', WebInterface(lambda: dict(
         (address, {'amount': value/1e8, 'merged': []}) for address, value
-            in node.get_current_txouts().iteritems())))
+            in node.get_current_txouts().items())))
 
-    web_root.putChild('peer_addresses', WebInterface(lambda: ' '.join('%s%s' % (peer.transport.getPeer().host, ':'+str(peer.transport.getPeer().port) if peer.transport.getPeer().port != node.net.P2P_PORT else '') for peer in node.p2p_node.peers.itervalues())))
-    web_root.putChild('peer_txpool_sizes', WebInterface(lambda: dict(('%s:%i' % (peer.transport.getPeer().host, peer.transport.getPeer().port), peer.remembered_txs_size) for peer in node.p2p_node.peers.itervalues())))
-    web_root.putChild('pings', WebInterface(defer.inlineCallbacks(lambda: defer.returnValue(
-        dict([(a, (yield b)) for a, b in
-            [(
-                '%s:%i' % (peer.transport.getPeer().host, peer.transport.getPeer().port),
-                defer.inlineCallbacks(lambda peer=peer: defer.returnValue(
-                    min([(yield peer.do_ping().addCallback(lambda x: x/0.001).addErrback(lambda fail: None)) for i in xrange(3)])
-                ))()
-            ) for peer in list(node.p2p_node.peers.itervalues())]
-        ])
-    ))))
-    web_root.putChild('peer_versions', WebInterface(lambda: dict(('%s:%i' % peer.addr, peer.other_sub_version) for peer in node.p2p_node.peers.itervalues())))
-    web_root.putChild('payout_addr', WebInterface(lambda: wb.address))
-    web_root.putChild('payout_addrs', WebInterface(
+    web_root.putChild(b'peer_addresses', WebInterface(lambda: ' '.join('%s%s' % (peer.transport.getPeer().host, ':'+str(peer.transport.getPeer().port) if peer.transport.getPeer().port != node.net.P2P_PORT else '') for peer in node.p2p_node.peers.values())))
+    web_root.putChild(b'peer_txpool_sizes', WebInterface(lambda: dict(('%s:%i' % (peer.transport.getPeer().host, peer.transport.getPeer().port), peer.remembered_txs_size) for peer in node.p2p_node.peers.values())))
+    @defer.inlineCallbacks
+    def get_pings():
+        # Was 'yield' inside a dict comprehension, rejected by Python 3.
+        # Same output: peer 'host:port' -> best ping in ms.
+        out = {}
+        for peer in list(node.p2p_node.peers.values()):
+            address = '%s:%i' % (peer.transport.getPeer().host,
+                                 peer.transport.getPeer().port)
+            out[address] = (yield _peer_ping_ms(peer))
+        defer.returnValue(out)
+
+    web_root.putChild(b'pings', WebInterface(get_pings))
+    web_root.putChild(b'peer_versions', WebInterface(lambda: dict(('%s:%i' % peer.addr, peer.other_sub_version) for peer in node.p2p_node.peers.values())))
+    web_root.putChild(b'payout_addr', WebInterface(lambda: wb.address))
+    web_root.putChild(b'payout_addrs', WebInterface(
         lambda: list(add['address'] for add in wb.pubkeys.keys)))
     def get_recent_blocks():
         try:
@@ -872,12 +896,12 @@ def get_web_root(wb, datadir_path, bitcoind_getinfo_var, stop_event=variable.Eve
             return result
         except Exception:
             return []
-    web_root.putChild('recent_blocks', WebInterface(get_recent_blocks))
-    web_root.putChild('uptime', WebInterface(lambda: time.time() - start_time))
-    web_root.putChild('stale_rates', WebInterface(lambda: p2pool_data.get_stale_counts(node.tracker, node.best_share_var.value, decent_height(), rates=True)))
+    web_root.putChild(b'recent_blocks', WebInterface(get_recent_blocks))
+    web_root.putChild(b'uptime', WebInterface(lambda: time.time() - start_time))
+    web_root.putChild(b'stale_rates', WebInterface(lambda: p2pool_data.get_stale_counts(node.tracker, node.best_share_var.value, decent_height(), rates=True)))
     
     new_root = resource.Resource()
-    web_root.putChild('web', new_root)
+    web_root.putChild(b'web', new_root)
     
     stat_log = []
     if os.path.exists(os.path.join(datadir_path, 'stats')):
@@ -913,8 +937,8 @@ def get_web_root(wb, datadir_path, bitcoind_getinfo_var, stop_event=variable.Eve
             stale_shares_breakdown=dict(orphan=stale_orphan_shares, doa=stale_doa_shares),
             current_payout=my_current_payout,
             peers=dict(
-                incoming=sum(1 for peer in node.p2p_node.peers.itervalues() if peer.incoming),
-                outgoing=sum(1 for peer in node.p2p_node.peers.itervalues() if not peer.incoming),
+                incoming=sum(1 for peer in node.p2p_node.peers.values() if peer.incoming),
+                outgoing=sum(1 for peer in node.p2p_node.peers.values() if not peer.incoming),
             ),
             attempts_to_share=bitcoin_data.target_to_average_attempts(node.tracker.items[node.best_share_var.value].max_target),
             attempts_to_block=bitcoin_data.target_to_average_attempts(node.bitcoind_work.value['bits'].target),
@@ -922,11 +946,11 @@ def get_web_root(wb, datadir_path, bitcoind_getinfo_var, stop_event=variable.Eve
         ))
         
         with open(os.path.join(datadir_path, 'stats'), 'wb') as f:
-            f.write(json.dumps(stat_log))
+            f.write(json.dumps(stat_log).encode('utf-8'))
     x = deferral.RobustLoopingCall(update_stat_log)
     x.start(5*60)
     stop_event.watch(x.stop)
-    new_root.putChild('log', WebInterface(lambda: stat_log))
+    new_root.putChild(b'log', WebInterface(lambda: stat_log))
     
     def get_share(share_hash_str):
         if int(share_hash_str, 16) not in node.tracker.items:
@@ -971,8 +995,8 @@ def get_web_root(wb, datadir_path, bitcoind_getinfo_var, stop_event=variable.Eve
                 ),
                 gentx=dict(
                     hash='%064x' % share.gentx_hash,
-                    raw=bitcoin_data.tx_id_type.pack(share.gentx).encode('hex') if hasattr(share, 'gentx') else "unknown",
-                    coinbase=share.share_data['coinbase'].ljust(2, '\x00').encode('hex'),
+                    raw=bitcoin_data.tx_id_type.pack(share.gentx).hex() if hasattr(share, 'gentx') else "unknown",
+                    coinbase=share.share_data['coinbase'].ljust(2, b'\x00').hex(),
                     value=share.share_data['subsidy']*1e-8,
                     last_txout_nonce='%016x' % share.contents['last_txout_nonce'],
                 ),
@@ -991,29 +1015,30 @@ def get_web_root(wb, datadir_path, bitcoind_getinfo_var, stop_event=variable.Eve
                                                    node.net.ADDRESS_VERSION, -1,
                                                    node.net.PARENT)
 
-    new_root.putChild('payout_address', WebInterface(lambda share_hash_str: get_share_address(share_hash_str)))
-    new_root.putChild('share', WebInterface(lambda share_hash_str: get_share(share_hash_str)))
-    new_root.putChild('heads', WebInterface(lambda: ['%064x' % x for x in node.tracker.heads]))
-    new_root.putChild('verified_heads', WebInterface(lambda: ['%064x' % x for x in node.tracker.verified.heads]))
-    new_root.putChild('tails', WebInterface(lambda: ['%064x' % x for t in node.tracker.tails for x in node.tracker.reverse.get(t, set())]))
-    new_root.putChild('verified_tails', WebInterface(lambda: ['%064x' % x for t in node.tracker.verified.tails for x in node.tracker.verified.reverse.get(t, set())]))
-    new_root.putChild('best_share_hash', WebInterface(lambda: '%064x' % node.best_share_var.value))
-    new_root.putChild('my_share_hashes', WebInterface(lambda: ['%064x' % my_share_hash for my_share_hash in wb.my_share_hashes]))
-    new_root.putChild('my_share_hashes50', WebInterface(lambda: ['%064x' % my_share_hash for my_share_hash in list(wb.my_share_hashes)[:50]]))
+    new_root.putChild(b'payout_address', WebInterface(lambda share_hash_str: get_share_address(share_hash_str)))
+    new_root.putChild(b'share', WebInterface(lambda share_hash_str: get_share(share_hash_str)))
+    new_root.putChild(b'heads', WebInterface(lambda: ['%064x' % x for x in node.tracker.heads]))
+    new_root.putChild(b'verified_heads', WebInterface(lambda: ['%064x' % x for x in node.tracker.verified.heads]))
+    new_root.putChild(b'tails', WebInterface(lambda: ['%064x' % x for t in node.tracker.tails for x in node.tracker.reverse.get(t, set())]))
+    new_root.putChild(b'verified_tails', WebInterface(lambda: ['%064x' % x for t in node.tracker.verified.tails for x in node.tracker.verified.reverse.get(t, set())]))
+    new_root.putChild(b'best_share_hash', WebInterface(lambda: '%064x' % node.best_share_var.value))
+    # Sets have non-deterministic iteration order; sort so the API is stable.
+    new_root.putChild(b'my_share_hashes', WebInterface(lambda: ['%064x' % my_share_hash for my_share_hash in sorted(wb.my_share_hashes)]))
+    new_root.putChild(b'my_share_hashes50', WebInterface(lambda: ['%064x' % my_share_hash for my_share_hash in sorted(wb.my_share_hashes)[:50]]))
     def get_share_data(share_hash_str):
         if int(share_hash_str, 16) not in node.tracker.items:
             return ''
         share = node.tracker.items[int(share_hash_str, 16)]
         return p2pool_data.share_type.pack(share.as_share())
-    new_root.putChild('share_data', WebInterface(lambda share_hash_str: get_share_data(share_hash_str), 'application/octet-stream'))
-    new_root.putChild('currency_info', WebInterface(lambda: dict(
+    new_root.putChild(b'share_data', WebInterface(lambda share_hash_str: get_share_data(share_hash_str), 'application/octet-stream'))
+    new_root.putChild(b'currency_info', WebInterface(lambda: dict(
         symbol=node.net.PARENT.SYMBOL,
         block_explorer_url_prefix=node.net.PARENT.BLOCK_EXPLORER_URL_PREFIX,
         address_explorer_url_prefix=node.net.PARENT.ADDRESS_EXPLORER_URL_PREFIX,
         tx_explorer_url_prefix=node.net.PARENT.TX_EXPLORER_URL_PREFIX,
         block_period=node.net.PARENT.BLOCK_PERIOD,
     )))
-    new_root.putChild('version', WebInterface(lambda: p2pool.__version__))
+    new_root.putChild(b'version', WebInterface(lambda: p2pool.__version__))
     
     hd_path = os.path.join(datadir_path, 'graph_db')
     hd_data = _atomic_read(hd_path)
@@ -1036,7 +1061,7 @@ def get_web_root(wb, datadir_path, bitcoind_getinfo_var, stop_event=variable.Eve
         'local_share_hash_rates': graph.DataStreamDescription(dataview_descriptions, is_gauge=False,
             multivalues=True, multivalue_undefined_means_0=True,
             default_func=graph.make_multivalue_migrator(dict(good='local_share_hash_rate', dead='local_dead_share_hash_rate', orphan='local_orphan_share_hash_rate'),
-                post_func=lambda bins: [dict((k, (v[0] - (sum(bin.get(rem_k, (0, 0))[0] for rem_k in ['dead', 'orphan']) if k == 'good' else 0), v[1])) for k, v in bin.iteritems()) for bin in bins])),
+                post_func=lambda bins: [dict((k, (v[0] - (sum(bin.get(rem_k, (0, 0))[0] for rem_k in ['dead', 'orphan']) if k == 'good' else 0), v[1])) for k, v in bin.items()) for bin in bins])),
         'pool_rates': graph.DataStreamDescription(dataview_descriptions, multivalues=True,
             multivalue_undefined_means_0=True),
         'current_payout': graph.DataStreamDescription(dataview_descriptions),
@@ -1093,7 +1118,7 @@ def get_web_root(wb, datadir_path, bitcoind_getinfo_var, stop_event=variable.Eve
         t = time.time()
         
         pool_rates = p2pool_data.get_stale_counts(node.tracker, node.best_share_var.value, lookbehind, rates=True)
-        pool_total = sum(pool_rates.itervalues())
+        pool_total = sum(pool_rates.values())
         hd.datastreams['pool_rates'].add_datum(t, pool_rates)
         
         current_txouts = node.get_current_txouts()
@@ -1126,13 +1151,13 @@ def get_web_root(wb, datadir_path, bitcoind_getinfo_var, stop_event=variable.Eve
         hd.datastreams['current_payouts'].add_datum(t, payout_by_addr)
         
         hd.datastreams['peers'].add_datum(t, dict(
-            incoming=sum(1 for peer in node.p2p_node.peers.itervalues() if peer.incoming),
-            outgoing=sum(1 for peer in node.p2p_node.peers.itervalues() if not peer.incoming),
+            incoming=sum(1 for peer in node.p2p_node.peers.values() if peer.incoming),
+            outgoing=sum(1 for peer in node.p2p_node.peers.values() if not peer.incoming),
         ))
         
         vs = p2pool_data.get_desired_version_counts(node.tracker, node.best_share_var.value, lookbehind)
-        vs_total = sum(vs.itervalues())
-        hd.datastreams['desired_version_rates'].add_datum(t, dict((str(k), v/vs_total*pool_total) for k, v in vs.iteritems()))
+        vs_total = sum(vs.values())
+        hd.datastreams['desired_version_rates'].add_datum(t, dict((str(k), v/vs_total*pool_total) for k, v in vs.items()))
         try:
             hd.datastreams['memory_usage'].add_datum(t, memory.resident())
         except:
@@ -1163,7 +1188,7 @@ def get_web_root(wb, datadir_path, bitcoind_getinfo_var, stop_event=variable.Eve
         if dv is None:
             return []
         return dv.get_data(time.time())
-    new_root.putChild('graph_data', WebInterface(_graph_data))
+    new_root.putChild(b'graph_data', WebInterface(_graph_data))
 
     # ==== Network difficulty history endpoint ====
     network_diff_history = []
@@ -1213,7 +1238,12 @@ def get_web_root(wb, datadir_path, bitcoind_getinfo_var, stop_event=variable.Eve
             request.setHeader('Content-Type', 'application/json')
             request.setHeader('Access-Control-Allow-Origin', '*')
             try:
-                period = (request.args.get('period') or ['hour'])[0]
+                # Twisted parses request.args with parse_qs, so under py3 the
+                # keys and values are bytes and a str lookup always misses --
+                # which silently pinned this endpoint to the 'hour' cutoff.
+                period = (request.args.get(b'period') or ['hour'])[0]
+                if isinstance(period, bytes):
+                    period = period.decode('ascii', 'replace')
                 now = time.time()
                 cutoffs = {'hour': 3600, 'day': 86400, 'week': 604800, 'month': 2592000, 'year': 31536000}
                 cutoff = now - cutoffs.get(period, 3600)
@@ -1223,13 +1253,18 @@ def get_web_root(wb, datadir_path, bitcoind_getinfo_var, stop_event=variable.Eve
                         'network_diff': bitcoin_data.target_to_difficulty(wb.current_work.value['bits'].target),
                         'source': 'current'})
                 samples.sort(key=lambda x: x['ts'])
-                return json.dumps(samples)
+                payload = json.dumps(samples)
             except:
-                return json.dumps([])
-    web_root.putChild('network_difficulty', NetworkDifficultyResource())
+                payload = json.dumps([])
+            # Twisted >= 21 rejects non-bytes from render_GET with a 500
+            # *before* the try/except above can help, so the encode has to
+            # happen here. py2 accepted str, which is why this only surfaced
+            # under py3.
+            return payload.encode('utf-8')
+    web_root.putChild(b'network_difficulty', NetworkDifficultyResource())
 
     if static_dir is None:
         static_dir = os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), 'web-static')
-    web_root.putChild('static', static.File(static_dir))
+    web_root.putChild(b'static', static.File(static_dir))
     
     return web_root
