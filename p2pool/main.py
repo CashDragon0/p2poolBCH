@@ -20,10 +20,14 @@ from twisted.web import server
 from twisted.python import log
 
 from .bitcoin import p2p as bitcoin_p2p, data as bitcoin_data
-from .bitcoin import stratum, worker_interface, helper
+from .bitcoin import helper
 from .bitcoin.broadcaster import NetworkBroadcaster
-from .util import fixargparse, jsonrpc, variable, deferral, math, logging, switchprotocol
-from . import networks, web, work
+from .util import fixargparse, variable, deferral, math, logging, switchprotocol
+from . import networks, web
+# stratum, work, worker_interface and jsonrpc are imported inside main(),
+# after the log tee is installed: all four have module-level banner prints
+# (STRATUM:/WORK: config lines) that would otherwise fire at import time
+# and land only on the real stderr, missing the logfile.
 import p2pool, p2pool.data as p2pool_data, p2pool.node as p2pool_node
 
 class keypool():
@@ -78,6 +82,12 @@ gnode = None # for debugging via rconsole/rfoo only
 
 @defer.inlineCallbacks
 def main(args, net, datadir_path, merged_urls, worker_endpoint):
+    # Deferred imports: see note at top of module. main() runs after
+    # run() installs the log tee, so module-level banner prints in these
+    # four modules land in the logfile instead of only on the real stderr.
+    from .bitcoin import stratum, worker_interface
+    from .util import jsonrpc
+    from . import work
     try:
         print('p2pool (version %s)' % (p2pool.__version__,))
         print()
@@ -750,6 +760,18 @@ peers picks the wrong address.''',
     pipe = logging.TimestampingPipe(logging.TeePipe([logging.EncodeReplacerPipe(sys.stderr), logfile]))
     sys.stdout = logging.AbortPipe(pipe)
     sys.stderr = log.DefaultObserver.stderr = logging.AbortPipe(logging.PrefixPipe(pipe, '> '))
+    # Modern twisted routes log.err() through twisted.logger.globalLogBeginner,
+    # whose startup temporary observer writes critical errors to the real fd 2
+    # captured at twisted import time -- bypassing the tee above. beginLoggingTo
+    # replaces that observer with one that goes through sys.stderr (the tee).
+    # redirectStandardIO=False leaves p2pool's own stdout/stderr handling alone.
+    from twisted.logger import globalLogBeginner
+    def _tee_log_err(event):
+        if event.get('isError'):
+            text = log.textFromEventDict(event)
+            if text:
+                sys.stderr.write(text if text.endswith('\n') else text + '\n')
+    globalLogBeginner.beginLoggingTo([_tee_log_err], discardBuffer=True, redirectStandardIO=False)
     if hasattr(signal, "SIGUSR1"):
         def sigusr1(signum, frame):
             print('Caught SIGUSR1, closing %r...' % (args.logfile,))

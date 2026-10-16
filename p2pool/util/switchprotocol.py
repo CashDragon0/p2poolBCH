@@ -5,7 +5,7 @@ class FirstByteSwitchProtocol(protocol.Protocol):
     def dataReceived(self, data):
         if self.p is None:
             if not data: return
-            serverfactory = self.factory.first_byte_to_serverfactory.get(data[0], self.factory.default_serverfactory)
+            serverfactory = self.factory.first_byte_to_serverfactory.get(chr(data[0]), self.factory.default_serverfactory)
             self.p = serverfactory.buildProtocol(self.transport.getPeer())
             self.p.makeConnection(self.transport)
         self.p.dataReceived(data)
