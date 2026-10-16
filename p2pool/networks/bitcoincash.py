@@ -20,13 +20,9 @@ MAX_TARGET = 2**256//2**32 - 1
 PERSIST = True # Set to False for solo mining or starting a new chain
 WORKER_PORT = 9348
 BOOTSTRAP_ADDRS = [
-        'ml.toom.im',
-        'bch.p2pool.leblancnet.us',
-        'siberia.mine.nu',
-        '5.8.79.155',
-        '18.209.181.17',
-        '95.79.35.133',
-        '193.29.58.47',
+        'p2pool.realbitcoin.cash',
+        '31.25.241.224',
+        '92.53.224.27',
         ]
 ANNOUNCE_CHANNEL = '#p2pool'
 VERSION_CHECK = lambda v: None if 100000 <= v else 'Bitcoin version too old. Upgrade to 0.11.2 or newer!' # not a bug. BIP65 support is ensured by SOFTFORKS_REQUIRED
