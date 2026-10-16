@@ -16,6 +16,23 @@ from .bitcoin import data as bitcoin_data, helper as bitcoin_helper
 from . import data as p2pool_data, p2p
 from .util import deferral, deferred_resource, graph, math, memory, pack, variable
 
+def _mask_ip(ip):
+    """Mask all but the last octet of an IPv4 address (x.x.x.NN).
+    IPv6 addresses get the last group kept, everything else masked."""
+    if not ip or ip == 'unknown':
+        return ip
+    if '.' in ip:  # IPv4
+        parts = ip.rsplit('.', 1)
+        if len(parts) == 2 and parts[1].isdigit():
+            return 'x.x.x.%s' % parts[1]
+        return 'x.x.x.x'
+    if ':' in ip:  # IPv6
+        parts = ip.rsplit(':', 1)
+        if len(parts) == 2:
+            return 'x:x%s' % parts[1] if parts[1] else 'x:x'
+        return 'x:x'
+    return 'x'
+
 @defer.inlineCallbacks
 def _peer_ping_ms(peer):
     """Best (lowest) round-trip of 3 pings, in ms.
@@ -423,7 +440,7 @@ def get_web_root(wb, datadir_path, bitcoind_getinfo_var, stop_event=variable.Eve
                 if ip not in ip_workers_map:
                     ip_workers_map[ip] = set()
                 ip_workers_map[ip].add(wname)
-            ip_workers = {ip: len(workers) for ip, workers in ip_workers_map.items()}
+            ip_workers = {_mask_ip(ip): len(workers) for ip, workers in ip_workers_map.items()}
             total_sockets = sum(info.get('conn_count', 1) for info in wb.connected_workers.values())
 
             # Submission rate: shares per second over last ~50 pseudoshares
@@ -448,7 +465,7 @@ def get_web_root(wb, datadir_path, bitcoind_getinfo_var, stop_event=variable.Eve
                     'total_rejected': total_rejected,
                     'submission_rate': submission_rate,
                     'uptime': time.time() - start_time,
-                    'ip_connections': ip_connections,
+                    'ip_connections': {_mask_ip(ip): count for ip, count in ip_connections.items()},
                     'ip_workers': ip_workers,
                     'threat_thresholds': {
                         'connection_worker_elevated': 4.0,
