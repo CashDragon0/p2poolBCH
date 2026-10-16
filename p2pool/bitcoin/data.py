@@ -455,6 +455,20 @@ def address_to_str(address):
     return address
 
 def address_to_pubkey_hash(address, net):
+    # pack.VarStrType.unpack() yields bytes, so share_data['address'] is
+    # bytes for every v34+ share received from a peer or loaded from disk.
+    # All three decoders below expect str: base58_decode's lstrip('1')
+    # raises TypeError on bytes, which get_legacy_pubkey_hash's blanket
+    # `except Exception` masks as AddrError -- so every share paying to a
+    # base58 (legacy 1.../3...) address fell through to the cashaddr
+    # decoder, failed again, and raised 'invalid addr', getting the peer
+    # banned. Coerce once here; cashaddr is ASCII, and base58/bech32
+    # payloads are too, so the decode is lossless.
+    if isinstance(address, bytes):
+        try:
+            address = address.decode('ascii')
+        except UnicodeDecodeError:
+            raise ValueError('invalid addr')
     try:
         return get_legacy_pubkey_hash(address, net)
     except AddrError:
