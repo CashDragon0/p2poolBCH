@@ -2401,15 +2401,12 @@
             }
         });
         
-        // Load node info for miner configuration (non-blocking, server responds instantly)
-        d3.json('../node_info', function(nodeInfo) {
-            if (nodeInfo && nodeInfo.external_ip) {
-                var minerUrl = 'stratum+tcp://' + nodeInfo.external_ip + ':' + nodeInfo.worker_port;
-                document.getElementById('miner-url').textContent = minerUrl;
-            } else {
-                document.getElementById('miner-url').textContent = 'unavailable';
-            }
-        });
+        // Stratum URL for miner config — derive from the browser's own
+        // location since the dashboard is served on the worker/stratum port.
+        (function() {
+            var minerUrl = 'stratum+tcp://' + window.location.hostname + ':' + (window.location.port || 80);
+            document.getElementById('miner-url').textContent = minerUrl;
+        })();
         
         function loadStats() {
             d3.json('../local_stats', function(local_stats) {

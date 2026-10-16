@@ -463,6 +463,7 @@
             });
             
             d3.json('../web/best_share_hash', function(c) {
+                if (!c) return;
                 d3.select('#best_share').append('a').attr('href', 'share.html#' + c).text(c.substr(-8));
             });
             
