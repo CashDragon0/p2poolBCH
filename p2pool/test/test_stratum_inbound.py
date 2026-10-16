@@ -159,14 +159,16 @@ class StratumInboundTest(unittest.TestCase):
             except Exception:
                 pass
 
-    def test_subscribe_returns_flat_form_and_schedules_notify(self):
+    def test_subscribe_returns_nested_form_and_schedules_notify(self):
         del self.proto.transport.written[:]
         send_line(self.proto, 'mining.subscribe', ['ccminer/2.0', None], id_=1)
         msgs = frames(self.proto.transport.written)
         # First frame is the JSON-RPC reply; the rest are server notifications.
         reply = msgs[0]
         self.assertEqual(reply['id'], 1)
-        self.assertEqual(reply['result'], [['mining.notify', 'p2p1'], '', 8])
+        self.assertEqual(reply['result'],
+                         [[['mining.notify', 'p2p1'],
+                           ['mining.set_difficulty', 'p2p2']], '', 8])
         self.assertEqual(reply['error'], None)
         methods = [m.get('method') for m in msgs[1:]]
         self.assertIn('mining.set_difficulty', methods)
@@ -196,6 +198,47 @@ class StratumInboundTest(unittest.TestCase):
         self.assertEqual(reply['result'],
                          {'version-rolling': True,
                           'version-rolling.mask': '1fffe000'})
+
+    def test_configure_subscribe_extranonce_returns_true(self):
+        # BIP310: requested extensions must be present in the result.
+        # infinite-hash-proxy / Braiins request subscribe-extranonce and
+        # drop the connection if it is missing or False.
+        del self.proto.transport.written[:]
+        send_line(self.proto, 'mining.configure',
+                  [['subscribe-extranonce', 'version-rolling'],
+                   {'version-rolling.mask': '1fffe000',
+                    'version-rolling.min-bit-count': '2'}],
+                  id_=2)
+        msgs = frames(self.proto.transport.written)
+        reply = msgs[0]
+        self.assertEqual(reply['id'], 2)
+        self.assertIs(reply['result']['subscribe-extranonce'], True)
+        self.assertIs(reply['result']['version-rolling'], True)
+        self.assertEqual(reply['result']['version-rolling.mask'], '1fffe000')
+
+    def test_extranonce_subscribe_returns_true(self):
+        # mining.extranonce.subscribe (NiceHash extension).  Before
+        # StratumExtranonceProvider existed this routed to "Service not
+        # found" (-32601) and strict clients dropped the connection.
+        del self.proto.transport.written[:]
+        send_line(self.proto, 'mining.extranonce.subscribe', [], id_=4)
+        msgs = frames(self.proto.transport.written)
+        reply = msgs[0]
+        self.assertEqual(reply['id'], 4)
+        self.assertIs(reply['result'], True)
+        self.assertIsNone(reply['error'])
+
+    def test_configure_unknown_extension_returns_false(self):
+        # Unimplemented extensions must still be present, as explicit False.
+        del self.proto.transport.written[:]
+        send_line(self.proto, 'mining.configure',
+                  [['subscribe-extranonce', 'minimum-difficulty'],
+                   {}],
+                  id_=2)
+        msgs = frames(self.proto.transport.written)
+        reply = msgs[0]
+        self.assertIs(reply['result']['subscribe-extranonce'], True)
+        self.assertIs(reply['result']['minimum-difficulty'], False)
 
     def test_submit_unknown_jobid_returns_false(self):
         del self.proto.transport.written[:]

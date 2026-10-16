@@ -179,12 +179,12 @@ if SET_DIFF_EVERY_NOTIFY:
 # off = legacy double-notify.  Recommended on if any FR-1.15 stock miners
 # are connecting.
 NOTIFY_AFTER_AUTH    = _envflag('STRATUM_NOTIFY_AFTER_AUTH')
-# Strict slush/NiceHash-style mining.subscribe response (nested array of
-# (method, id) pairs, includes mining.set_difficulty subscription).
-# Required by some Bitmain stock firmware (S21+ stock) which enforces the
-# spec literally; the older flat form ['mining.notify', id] is silently
-# accepted by bitaxe/Whatsminer/vnish but rejected by strict CGMiner branches.
-NICEHASH_COMPAT      = _envflag('STRATUM_NICEHASH_COMPAT')
+# Legacy flat mining.subscribe response (single [method, id] pair instead
+# of a nested array of pairs).  Silently accepted by bitaxe/Whatsminer/vnish
+# but rejected by NiceHash and strict CGMiner branches.  Default is now the
+# spec-compliant nested form; set STRATUM_FLAT_SUBSCRIBE=1 to opt back into
+# the old flat form.
+FLAT_SUBSCRIBE       = _envflag('STRATUM_FLAT_SUBSCRIBE')
 # Per-connection dialog trace: dumps every send/recv with timestamp,
 # peer IP, worker name, method, and key params.  Reconstructs the seconds
 # leading up to a disconnect from journald.  Verbose — leave off in
@@ -259,8 +259,8 @@ if DISABLE_LATENCY_PING:
     print('STRATUM: client.get_version latency ping DISABLED via STRATUM_DISABLE_LATENCY_PING')
 if DISABLE_IDLE_NUDGE:
     print('STRATUM: idle-reconnect nudge DISABLED via STRATUM_DISABLE_IDLE_NUDGE')
-if NICEHASH_COMPAT:
-    print('STRATUM: NiceHash-compatible subscribe response ENABLED via STRATUM_NICEHASH_COMPAT')
+if FLAT_SUBSCRIBE:
+    print('STRATUM: legacy flat subscribe response ENABLED via STRATUM_FLAT_SUBSCRIBE')
 if TRACE:
     print('STRATUM: per-connection dialog trace ENABLED via STRATUM_TRACE')
 if REJECT_DUMP_PATH:
@@ -338,6 +338,26 @@ def _format_alt_rows(rows):
                 row['label'], row['miss'], ' OK' if row.get('would_accept') else ''))
     return '; '.join(parts)
 
+class StratumExtranonceProvider(object):
+    """mining.extranonce.subscribe (NiceHash stratum extension).
+
+    The miner asks to be notified if the pool ever changes extranonce1
+    mid-session (mining.set_extranonce push).  Agreeing only means we MAY
+    push — many pools implement the method and simply never rotate.  We
+    never rotate, so rpc_subscribe just returns True.  Without this
+    provider, jsonrpc's dotted-method routing (svc_mining.svc_extranonce)
+    raises "Service not found" and strict clients (infinite-hash-proxy)
+    drop the connection on the error.
+    """
+
+    def __init__(self, mining):
+        self._mining = mining
+
+    def rpc_subscribe(self):
+        self._mining._trace('<--', 'extranonce.subscribe')
+        return True
+
+
 class StratumRPCMiningProvider(object):
     def __init__(self, wb, other, transport):
         self.pool_version_mask = 0x1fffe000
@@ -405,6 +425,8 @@ class StratumRPCMiningProvider(object):
         # is used in _send_work instead of the global SENT_DIFF_MULT.
         self.miner_ua = None
         self._conn_sent_diff_mult = SENT_DIFF_MULT
+        # mining.extranonce.subscribe sub-service (NiceHash extension).
+        self.svc_extranonce = StratumExtranonceProvider(self)
 
     def _trace(self, direction, method, **fields):
         if not TRACE:
@@ -430,7 +452,7 @@ class StratumRPCMiningProvider(object):
                     break
         self._trace('<--', 'subscribe', ua=repr(miner_version),
                     mult='%.4gx' % self._conn_sent_diff_mult,
-                    form=('nested' if NICEHASH_COMPAT else 'flat'))
+                    form=('flat' if FLAT_SUBSCRIBE else 'nested'))
         # Skip the subscribe-time send_work when STRATUM_NOTIFY_AFTER_AUTH is
         # set; rpc_authorize will fire send_work after the full handshake
         # completes — producing exactly ONE notify, matching kr1z1s / ckpool.
@@ -447,24 +469,27 @@ class StratumRPCMiningProvider(object):
         id_prefix = en1_hex if en1_hex else 'p2p'
         notify_id   = id_prefix + '1'
         setdiff_id  = id_prefix + '2'
-        if NICEHASH_COMPAT:
-            # Strict slush/NiceHash form: subscription_details is a LIST of
-            # (method, id) pairs.  The order matters: kr1z1s (and ckpool /
-            # NiceHash) puts mining.notify FIRST then mining.set_difficulty.
-            # Stock CGMiner forks have been observed position-parsing this
-            # array and breaking when the order is reversed.
+        if FLAT_SUBSCRIBE:
+            # Legacy flat form: single [method, id] pair.  Silently accepted
+            # by bitaxe/Whatsminer/vnish but rejected by NiceHash and strict
+            # CGMiner branches.
             return [
-                [
-                    ["mining.notify",         notify_id],
-                    ["mining.set_difficulty", setdiff_id],
-                ],
-                en1_hex,
-                en2_size,
+                ["mining.notify", notify_id], # subscription details
+                en1_hex, # extranonce1
+                en2_size, # extranonce2_size
             ]
+        # Spec-compliant (default): subscription_details is a LIST of
+        # (method, id) pairs.  The order matters: kr1z1s (and ckpool /
+        # NiceHash) puts mining.notify FIRST then mining.set_difficulty.
+        # Stock CGMiner forks have been observed position-parsing this
+        # array and breaking when the order is reversed.
         return [
-            ["mining.notify", notify_id], # subscription details
-            en1_hex, # extranonce1
-            en2_size, # extranonce2_size
+            [
+                ["mining.notify",         notify_id],
+                ["mining.set_difficulty", setdiff_id],
+            ],
+            en1_hex,
+            en2_size,
         ]
     
     def rpc_authorize(self, username, password):
@@ -628,29 +653,37 @@ class StratumRPCMiningProvider(object):
         #extensionParameters is a dict of parameters for each extension code
         self._trace('<--', 'configure', exts=','.join(extensions),
                     mask=extensionParameters.get('version-rolling.mask', '-'))
+        result = {}
         if 'version-rolling' in extensions:
             # When STRATUM_DISABLE_ASICBOOST is set, decline version-rolling
             # by returning the disabled form.  This mimics vanilla jtoomim
             # p2pool which lacks rpc_configure entirely; strict firmware
             # (Antminer stock) then falls back to non-rolled mining.
             if DISABLE_ASICBOOST:
-                return {"version-rolling": False}
-            #mask from miner is mandatory but we dont use it
-            miner_mask = extensionParameters['version-rolling.mask']
-            #min-bit-count from miner is mandatory but we dont use it
-            try:
-                minbitcount = extensionParameters['version-rolling.min-bit-count']
-            except:
-                log.err("A miner tried to connect with a malformed version-rolling.min-bit-count parameter. This is probably a bug in your mining software. Braiins OS is known to have this bug. You should complain to them.")
-                minbitcount = 2 # probably not needed
-            #according to the spec, pool should return largest mask possible (to support mining proxies)
-            return {"version-rolling" : True, "version-rolling.mask" : '{:08x}'.format(self.pool_version_mask&(int(miner_mask,16)))}
-            #pool can send mining.set_version_mask at any time if the pool mask changes
-
-        if 'minimum-difficulty' in extensions:
-            print('Extension method minimum-difficulty not implemented')
-        if 'subscribe-extranonce' in extensions:
-            print('Extension method subscribe-extranonce not implemented')
+                result['version-rolling'] = False
+            else:
+                #mask from miner is mandatory but we dont use it
+                miner_mask = extensionParameters['version-rolling.mask']
+                #min-bit-count from miner is mandatory but we dont use it
+                try:
+                    minbitcount = extensionParameters['version-rolling.min-bit-count']
+                except:
+                    log.err("A miner tried to connect with a malformed version-rolling.min-bit-count parameter. This is probably a bug in your mining software. Braiins OS is known to have this bug. You should complain to them.")
+                    minbitcount = 2 # probably not needed
+                #according to the spec, pool should return largest mask possible (to support mining proxies)
+                result['version-rolling'] = True
+                result['version-rolling.mask'] = '{:08x}'.format(self.pool_version_mask&(int(miner_mask,16)))
+                #pool can send mining.set_version_mask at any time if the pool mask changes
+        # BIP310: the result object MUST contain a boolean value for each
+        # requested extension.  We implement mining.extranonce.subscribe
+        # (accept-and-never-rotate), so advertise true; other unimplemented
+        # extensions get explicit False.
+        for ext in extensions:
+            if ext not in result:
+                result[ext] = (ext == 'subscribe-extranonce')
+        if not result:
+            return None
+        return result
 
     _DEFERRED_WORK_LOG_INTERVAL = 30  # seconds between repeated startup-state log lines
 
@@ -1212,6 +1245,36 @@ class StratumProtocol(jsonrpc.LineBasedPeer):
             except:
                 pass
         svc.close()
+
+    def lineReceived(self, line):
+        # RAW dialog capture (STRATUM_TRACE): the structured _trace calls in
+        # rpc_* only fire for methods we implement — an unimplemented method
+        # (e.g. mining.extranonce.subscribe from a strict proxy) produces a
+        # "Method not found" error response that was previously invisible,
+        # making it impossible to see what the miner actually said before
+        # dropping the connection.  Log every received line verbatim.
+        if TRACE:
+            try:
+                peer = self.transport.getPeer()
+                who = getattr(getattr(self, 'svc_mining', None), 'username', None) or '-'
+                print('[STRATUM_TRACE] %s [%s] [%s] <-- RAW %r' % (
+                    _ts(), peer.host, who, line))
+            except Exception:
+                pass
+        jsonrpc.LineBasedPeer.lineReceived(self, line)
+
+    def _send_line(self, line):
+        # RAW dialog capture (outgoing direction).  line is the framed JSON
+        # string about to hit the wire (response or server-push request).
+        if TRACE:
+            try:
+                peer = self.transport.getPeer()
+                who = getattr(getattr(self, 'svc_mining', None), 'username', None) or '-'
+                print('[STRATUM_TRACE] %s [%s] [%s] --> RAW %r' % (
+                    _ts(), peer.host, who, line))
+            except Exception:
+                pass
+        jsonrpc.LineBasedPeer._send_line(self, line)
 
 class StratumServerFactory(protocol.ServerFactory):
     protocol = StratumProtocol
