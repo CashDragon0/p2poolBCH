@@ -1,18 +1,29 @@
+# Python
+__pycache__/
 *.pyc
-*.pyo
 *~
+*.egg-info/
+.eggs/
+*.so
 
-/data/
-/litecoin_scrypt/build/
+# Virtual environments
+.venv/
+
+# Test / coverage artifacts
 /_trial_temp*
-Makefile.local
 .cache/
-.pkglist
-.pyenv/
 .coverage
+.pytest_cache/
+
+# Type checker
+.mypy_cache/
+
+# Build
 build/
-ltc_scrypt.so
-remote-logs/
-external-logs/
-kr1z1s/
-diag/
+Makefile.local
+
+# Runtime data
+/data/
+
+# pyenv
+.pyenv/
