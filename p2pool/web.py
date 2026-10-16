@@ -1021,7 +1021,7 @@ def get_web_root(wb, datadir_path, bitcoind_getinfo_var, stop_event=variable.Eve
     new_root.putChild(b'verified_heads', WebInterface(lambda: ['%064x' % x for x in node.tracker.verified.heads]))
     new_root.putChild(b'tails', WebInterface(lambda: ['%064x' % x for t in node.tracker.tails for x in node.tracker.reverse.get(t, set())]))
     new_root.putChild(b'verified_tails', WebInterface(lambda: ['%064x' % x for t in node.tracker.verified.tails for x in node.tracker.verified.reverse.get(t, set())]))
-    new_root.putChild(b'best_share_hash', WebInterface(lambda: '%064x' % node.best_share_var.value))
+    new_root.putChild(b'best_share_hash', WebInterface(lambda: None if node.best_share_var.value is None else '%064x' % node.best_share_var.value))
     # Sets have non-deterministic iteration order; sort so the API is stable.
     new_root.putChild(b'my_share_hashes', WebInterface(lambda: ['%064x' % my_share_hash for my_share_hash in sorted(wb.my_share_hashes)]))
     new_root.putChild(b'my_share_hashes50', WebInterface(lambda: ['%064x' % my_share_hash for my_share_hash in sorted(wb.my_share_hashes)[:50]]))
