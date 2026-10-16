@@ -925,9 +925,9 @@ class WorkerBridge(worker_interface.WorkerBridge):
                     self.recent_shares_ts_work.pop(0)
                 self.local_rate_monitor.add_datum(dict(work=bitcoin_data.target_to_average_attempts(pseudoshare_target), dead=not on_time, user=username, share_target=share_info['bits'].target))
                 self.local_addr_rate_monitor.add_datum(dict(work=bitcoin_data.target_to_average_attempts(pseudoshare_target), address=address))
-                if username in self.connected_workers:
-                    self.connected_workers[username]['last_diff'] = bitcoin_data.target_to_difficulty(pseudoshare_target)
-                    self.connected_workers[username]['last_share_time'] = time.time()
+                if raw_username in self.connected_workers:
+                    self.connected_workers[raw_username]['last_diff'] = bitcoin_data.target_to_difficulty(pseudoshare_target)
+                    self.connected_workers[raw_username]['last_share_time'] = time.time()
                 # Track best pow difficulty per address
                 pow_diff = bitcoin_data.target_to_difficulty(pow_hash)
                 if pow_diff > self.address_best_diff.get(address, 0):
