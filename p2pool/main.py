@@ -339,7 +339,7 @@ def main(args, net, datadir_path, merged_urls, worker_endpoint):
         # snapshotted at detection time so later tracker pruning can't lose them.
         block_hist = block_history.BlockHistory(
             os.path.join(datadir_path, 'block_history.jsonl'),
-            retention_days=max(1, args.block_history_days))
+            retention_days=(3 if args.block_history_days <= 0 else min(365, args.block_history_days)))
 
         def _record_block(share):
             try:
@@ -632,7 +632,7 @@ peers picks the wrong address.''',
         help='''don't advertise local IP address as being available for incoming connections. useful for running a dark node, along with multiple -n ADDR's and --outgoing-conns 0''',
         action='store_false', default=True, dest='advertise_ip')
     parser.add_argument('--block-history-days', metavar='DAYS',
-        help='how many days of found-block history to keep for /recent_blocks, /luck_stats, and graphs (default: 90)',
+        help='how many days of found-block history to keep for /recent_blocks, /luck_stats, and graphs (default: 90, allowed range: 1-365)',
         type=int, action='store', default=90, dest='block_history_days')
     
     worker_group = parser.add_argument_group('worker interface')
