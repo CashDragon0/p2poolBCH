@@ -23,7 +23,7 @@ from .bitcoin import p2p as bitcoin_p2p, data as bitcoin_data
 from .bitcoin import helper
 from .bitcoin.broadcaster import NetworkBroadcaster
 from .util import fixargparse, variable, deferral, math, logging, switchprotocol
-from . import networks, web
+from . import networks, web, block_history
 # stratum, work, worker_interface and jsonrpc are imported inside main(),
 # after the log tee is installed: all four have module-level banner prints
 # (STRATUM:/WORK: config lines) that would otherwise fire at import time
@@ -333,8 +333,44 @@ def main(args, net, datadir_path, merged_urls, worker_endpoint):
         wb = work.WorkerBridge(node, my_address, args.donation_percentage,
                                merged_urls, args.worker_fee, args, pubkeys,
                                bitcoind, args.share_rate)
-        
-        web_root = web.get_web_root(wb, datadir_path, bitcoind_getinfo_var, static_dir=args.web_static)
+
+        # Persistent found-block history: keeps /recent_blocks, /luck_stats and
+        # graphs meaningful beyond the ~3-day in-memory share chain. Records are
+        # snapshotted at detection time so later tracker pruning can't lose them.
+        block_hist = block_history.BlockHistory(
+            os.path.join(datadir_path, 'block_history.jsonl'),
+            retention_days=max(1, args.block_history_days))
+
+        def _record_block(share):
+            try:
+                if not (share.pow_hash <= share.header['bits'].target):
+                    return
+                try:
+                    pool_rate = p2pool_data.get_pool_attempts_per_second(
+                        node.tracker, share.hash, max(2, 3600 // net.SHARE_PERIOD))
+                except Exception:
+                    pool_rate = None
+                rec = block_history.make_block_record(share, node.tracker, net, pool_hash_rate=pool_rate)
+                block_hist.add_block(rec)
+            except Exception:
+                log.err(None, 'Error recording block to history:')
+
+        node.tracker.verified.added.watch(_record_block)
+
+        # Backfill from whatever the in-memory tracker currently holds so the
+        # store isn't empty on first run / after a wipe. add_block dedupes.
+        try:
+            if node.best_share_var.value is not None:
+                chain_height = node.tracker.get_height(node.best_share_var.value)
+                for s in node.tracker.get_chain(node.best_share_var.value,
+                                                min(chain_height, net.CHAIN_LENGTH)):
+                    if s.pow_hash <= s.header['bits'].target:
+                        _record_block(s)
+        except Exception:
+            log.err(None, 'Error backfilling block history:')
+
+        web_root = web.get_web_root(wb, datadir_path, bitcoind_getinfo_var, static_dir=args.web_static,
+                                    block_history=block_hist)
         caching_wb = worker_interface.CachingWorkerBridge(wb)
         worker_interface.WorkerInterface(caching_wb).attach_to(web_root, get_handler=lambda request: request.redirect('/static/dashboard.html'))
         web_serverfactory = server.Site(web_root)
@@ -603,6 +639,9 @@ peers picks the wrong address.''',
     parser.add_argument('--disable-advertise',
         help='''don't advertise local IP address as being available for incoming connections. useful for running a dark node, along with multiple -n ADDR's and --outgoing-conns 0''',
         action='store_false', default=True, dest='advertise_ip')
+    parser.add_argument('--block-history-days', metavar='DAYS',
+        help='how many days of found-block history to keep for /recent_blocks, /luck_stats, and graphs (default: 90)',
+        type=int, action='store', default=90, dest='block_history_days')
     
     worker_group = parser.add_argument_group('worker interface')
     worker_group.add_argument('-w', '--worker-port', metavar='PORT or ADDR:PORT',

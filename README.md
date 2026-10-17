@@ -54,6 +54,12 @@ in that order. If you omit them, `run_p2pool.py` reads `rpcuser=` /
 `rpcpassword=` from `~/.bitcoin/bitcoin.conf`. Use `--help` for the full flag
 list.
 
+`--block-history-days N` controls how long found-block history is kept for
+`/recent_blocks`, `/luck_stats`, and the graphs (default: 90). Records are
+appended to `block_history.jsonl` in the datadir as blocks are found, so the
+window survives restarts and reaches back further than the ~3-day in-memory
+share chain.
+
 Networks: `--net {bitcoincash,bitcoincash_regtest}`. For testnet, add
 `--testnet` to `--net bitcoincash` (ports 19339/19338).
 
@@ -163,12 +169,12 @@ path segment, not a query string (e.g. `/miner_stats/<address>`).
 | `/v36_status` | share-chain protocol status |
 | `/network_difficulty` | network difficulty |
 | `/version_signaling` | client version signalling |
-| `/recent_blocks` | recent blocks found |
+| `/recent_blocks` | recent blocks found (from persistent history, default 90 days) |
 | `/recent_merged_blocks` | recent merged-mined blocks |
 | `/current_payouts` | current block payout outputs |
 | `/current_merged_payouts` | current merged payout outputs |
 | `/best_share` | best share data |
-| `/luck_stats` | per-block luck calculation |
+| `/luck_stats` | per-block luck calculation (retroactive, over the full history window) |
 | `/stratum_stats` | per-worker hashrate, shares, latency |
 | `/stratum_security` | share-rate and burst metrics |
 | `/ban_stats` | ban counters |

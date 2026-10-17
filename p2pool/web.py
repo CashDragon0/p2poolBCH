@@ -80,7 +80,8 @@ def _atomic_write(filename, data):
         os.rename(filename + '.new', filename)
 
 def get_web_root(wb, datadir_path, bitcoind_getinfo_var, stop_event=variable.Event(), static_dir=None,
-                 enable_miner_messages=False, transition_message=None, trusted_proxy=None):
+                 enable_miner_messages=False, transition_message=None, trusted_proxy=None,
+                 block_history=None):
     node = wb.node
     start_time = time.time()
 
@@ -763,6 +764,11 @@ def get_web_root(wb, datadir_path, bitcoind_getinfo_var, stop_event=variable.Eve
         return result
     web_root.putChild(b'peer_list', WebInterface(get_peer_list))
     def get_luck_stats():
+        if block_history is not None:
+            try:
+                return block_history.get_luck_stats()
+            except Exception:
+                log.err(None, 'Error reading block history luck:')
         if node.best_share_var.value is None or node.bitcoind_work.value is None:
             return dict(luck_available=False, current_luck_trend=None, blocks=[])
         try:
@@ -828,6 +834,11 @@ def get_web_root(wb, datadir_path, bitcoind_getinfo_var, stop_event=variable.Eve
     web_root.putChild(b'payout_addrs', WebInterface(
         lambda: list(add['address'] for add in wb.pubkeys.keys)))
     def get_recent_blocks():
+        if block_history is not None:
+            try:
+                return block_history.get_recent_blocks()
+            except Exception:
+                log.err(None, 'Error reading block history:')
         try:
             if node.best_share_var.value is None or node.bitcoind_work.value is None:
                 return []
@@ -1094,10 +1105,22 @@ def get_web_root(wb, datadir_path, bitcoind_getinfo_var, stop_event=variable.Eve
         'connected_miners': graph.DataStreamDescription(dataview_descriptions),
         'unique_miner_count': graph.DataStreamDescription(dataview_descriptions),
         'worker_count': graph.DataStreamDescription(dataview_descriptions),
+        'blocks_found': graph.DataStreamDescription(dataview_descriptions, is_gauge=False),
     }, hd_obj)
     x = deferral.RobustLoopingCall(lambda: _atomic_write(hd_path, json.dumps(hd.to_obj())))
     x.start(100)
     stop_event.watch(x.stop)
+    if block_history is not None:
+        def _feed_blocks_graph(record):
+            try:
+                if record.get('ts'):
+                    hd.datastreams['blocks_found'].add_datum(record['ts'], 1)
+            except Exception:
+                pass
+        # seed the graph from already-recorded history (survives graph_db resets)
+        for _rec in block_history.blocks:
+            _feed_blocks_graph(_rec)
+        block_history.watch(_feed_blocks_graph)
     @wb.pseudoshare_received.watch
     def _(work, dead, user):
         t = time.time()

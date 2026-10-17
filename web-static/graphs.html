@@ -68,6 +68,9 @@
         <h2>Pool rate</h2>
         <svg id="pool"></svg>
         
+        <h2>Blocks found</h2>
+        <svg id="blocks_found"></svg>
+        
         <h2>Peers</h2>
         <svg id="peers"></svg>
         
@@ -504,6 +507,9 @@
                 d3.json("../web/graph_data/pool_rates/last_" + lowerperiod, function(data) {
                     plot(d3.select('#pool'), 'H/s', 'H', data_to_lines(data), true);
                 });
+                plot_later(d3.select("#blocks_found"), "Blocks", null, [
+                    {"url": "../web/graph_data/blocks_found/last_" + lowerperiod, "color": "#00AA00", "label": "Found"}
+                ], false);
                 d3.json("../web/graph_data/peers/last_" + lowerperiod, function(data) {
                     plot(d3.select('#peers'), 'Total', null, data_to_lines(data, function(line){ return line.label == "incoming" }), true);
                 });

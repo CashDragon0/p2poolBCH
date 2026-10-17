@@ -4767,7 +4767,13 @@
                         currentRoundLuck = 100;
                     }
                     luckTrendData.push([maxTime, currentRoundLuck]);
-                    validLucks.push(currentRoundLuck); // Include current round in avg luck
+                    // Only count the current round toward Avg Luck when it's real backend
+                    // share-based luck. A time-based estimate (100*target/elapsed) is an
+                    // artifact of 'time since last block', not measured luck — including it
+                    // shows a bogus percentage (e.g. ~1%) when no real luck data exists yet.
+                    if (graphCurrentLuckTrend !== null && graphCurrentLuckTrend > 0) {
+                        validLucks.push(graphCurrentLuckTrend);
+                    }
                 }
             } else if (luckTrendData.length === 0 && sortedBlocks.length > 0) {
                 // Edge case: No blocks in time window, but blocks exist before it
@@ -4792,7 +4798,13 @@
                         : luckAtMax;
                     luckTrendData.push([minTime, luckAtMin]);
                     luckTrendData.push([maxTime, luckAtMax]);
-                    validLucks.push(luckAtMax); // Include current round in avg luck
+                    // Only count the current round toward Avg Luck when it's real backend
+                    // share-based luck. A time-based estimate (100*target/elapsed) is an
+                    // artifact of 'time since last block', not measured luck — including it
+                    // shows a bogus percentage (e.g. ~1%) when no real luck data exists yet.
+                    if (graphCurrentLuckTrend !== null && graphCurrentLuckTrend > 0) {
+                        validLucks.push(graphCurrentLuckTrend);
+                    }
                 }
             }
             
@@ -5493,7 +5505,13 @@
                         currentRoundLuck = 100;
                     }
                     luckTrendData.push([maxTime, currentRoundLuck]);
-                    validLucks.push(currentRoundLuck); // Include current round in avg luck
+                    // Only count the current round toward Avg Luck when it's real backend
+                    // share-based luck. A time-based estimate (100*target/elapsed) is an
+                    // artifact of 'time since last block', not measured luck — including it
+                    // shows a bogus percentage (e.g. ~1%) when no real luck data exists yet.
+                    if (graphCurrentLuckTrend !== null && graphCurrentLuckTrend > 0) {
+                        validLucks.push(graphCurrentLuckTrend);
+                    }
                 }
             } else if (luckTrendData.length === 0 && sortedBlocks.length > 0) {
                 // Edge case: No blocks in time window, but blocks exist before it
@@ -5518,7 +5536,13 @@
                         : luckAtMax;
                     luckTrendData.push([minTime, luckAtMin]);
                     luckTrendData.push([maxTime, luckAtMax]);
-                    validLucks.push(luckAtMax); // Include current round in avg luck
+                    // Only count the current round toward Avg Luck when it's real backend
+                    // share-based luck. A time-based estimate (100*target/elapsed) is an
+                    // artifact of 'time since last block', not measured luck — including it
+                    // shows a bogus percentage (e.g. ~1%) when no real luck data exists yet.
+                    if (graphCurrentLuckTrend !== null && graphCurrentLuckTrend > 0) {
+                        validLucks.push(graphCurrentLuckTrend);
+                    }
                 }
             }
             
