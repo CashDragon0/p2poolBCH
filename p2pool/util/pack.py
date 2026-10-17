@@ -2,6 +2,7 @@ import binascii
 import struct
 import io
 import os
+import ipaddress
 
 import p2pool
 from p2pool.util import memoize
@@ -238,7 +239,7 @@ class IPV6AddressType(Type):
     
     def write(self, file, item):
         if ':' in item:
-            data = bytes.fromhex(item.replace(':', ''))
+            data = ipaddress.IPv6Address(item).packed
         else:
             bits = [int(x) for x in item.split('.')]
             if len(bits) != 4:

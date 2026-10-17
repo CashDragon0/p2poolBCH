@@ -91,15 +91,19 @@ Left as-is — do not "improve" during the port.
 
 ## Golden-vector artifact
 
-- `p2pool/test/golden_vectors.json` — 137,341 bytes
-  sha256 `6afa3592f3ee7edc9fcd945c184ea1121002dc520091a0e547367b7c5bece7fc`
-- 945 vectors: 901 successes + 44 intentional negative cases
+- `p2pool/test/golden_vectors.json` — 137,898 bytes
+  sha256 `b1cd6387bdc150068b3877b83da41019a963cea5f7d9b4813627671fd15f0974`
+- 945 vectors: 908 successes + 37 intentional negative cases
 - 11 sections: address, bech32, cashaddr, hash, math, merkle, net, pack,
   payout, script, template
 - Re-frozen after Phase 1 (only the 3 BCH networks remain, so the `net`
   section shrank; the 3 `net.fastcoin/terracoin/terracoin_testnet`
   AttributeError negatives went away with them).
-- Capture is deterministic — re-running under py2 reproduces it exactly.
+- Re-frozen for Phase 2 (7 keys corrected — see "Phase 2" below):
+  `script.push_10` (py2 OP_PUSHDATA1 crash -> correct `4c64...` encoding)
+  and `pack.ipv6_4/4_rt/5/5_rt/6/6_rt` (py2 could not parse valid IPv6
+  text forms -> `ipaddress`-based parsing). Capture remains deterministic
+  under py3 — re-running reproduces the file exactly.
 
 Coverage of the consensus-critical paths:
 
@@ -252,10 +256,12 @@ This was masked in CI precisely because the docker smoke test that exercised
 `./contrib/run-tests.sh --help` is the local equivalent and it now works.
 
 
-## Phase 2: known gate divergences (3 of 945)
+## Phase 2: gate divergences — all resolved (0 of 945)
 
-All three are **negative or behaviour-correction cases**, and each was
-verified rather than assumed.
+The three original divergences were each traced to a defect in the **py2
+base code**, not to a port mistake. All three are now fixed in the port and
+the golden vectors record the corrected behaviour. The gate reads clean
+(0 mismatches).
 
 ### `script.push_10` — py2 was broken; the port fixes it
 
@@ -271,7 +277,7 @@ push(100 bytes) -> TypeError: sequence item 0: expected string, int found
 
 So the OP_PUSHDATA1 path was **entirely broken on py2 — it raised rather than
 emitting a malformed script**. The intent was clearly 76 == 0x4c ==
-OP_PUSHDATA1. Python 3 now emits the correct encoding (`4c64ff...`).
+OP_PUSHDATA1. Python 3 emits the correct encoding (`4c64ff...`).
 
 Why this is safe: the path *crashed*, so it never produced a malformed
 coinbase. No historical block was built through it, so there is nothing to
@@ -279,12 +285,32 @@ diverge from. In practice p2pool's datums (32-byte hashes, the 32-byte
 `[P2Pool]` witness value) all stay under 76 bytes, which is why it went
 unnoticed.
 
-**Decision: accept the divergence.** Documented rather than silenced.
+The frozen golden vector previously recorded py2's `TypeError` crash; it now
+records the corrected encoding.
 
-### `pack.ipv6_4` / `ipv6_4_rt` — exception class differs, behaviour identical
+### `pack.ipv6_*` — py2 could not parse valid IPv6 text forms
 
-Input `0000:0000:0000:0000:0000:ffff:192.168.1.1` has an odd-length hex
-payload once the colons are stripped. py2's `str.decode('hex')` raised
-`TypeError`; py3's `bytes.fromhex()` raises `ValueError`. Both reject the
-input; only the exception class differs. This is a pure interpreter
-difference in a negative test, not a port defect.
+`IPV6AddressType.write` stripped colons and hex-decoded the remainder, so it
+only accepted fully-expanded hex groups. Three test inputs failed on py2:
+
+- `ipv6_4` / `ipv6_4_rt` (`0000:...:ffff:192.168.1.1`, valid RFC 4291 mixed
+  notation): the dotted quad broke hex decoding — `TypeError` on py2,
+  `ValueError` on py3. This was the original "exception class differs"
+  mismatch: identical rejection, different interpreter exception.
+- `ipv6_5` / `ipv6_6` (`::` and `2001:db8::1`, compressed notation): hex
+  decoding produced a short buffer and the length assert fired —
+  `AssertionError` on both py2 and the faithfully-porting py3 (no gate
+  mismatch, but the same defect).
+
+The compressed-form bug was **reachable in production**: `IPV6AddressType` is
+only used by `address_type`, which serializes `addr_to`/`addr_from` in P2P
+version messages from `transport.getPeer().host`. Twisted returns IPv6 hosts
+in compressed form, so any IPv6 peer connecting to the P2P port crashed the
+version-message serialization with `AssertionError`. The node survived only
+because every live peer so far has been IPv4.
+
+Fixed by parsing with stdlib `ipaddress.IPv6Address(item).packed`, which
+accepts every RFC 4291 textual form (full, compressed, mixed) and raises
+`ValueError` on garbage. Output bytes are identical for the forms that
+already worked; the wire format is unchanged. Not consensus-critical either
+way — this type never touches shares, transactions, or the stratum path.

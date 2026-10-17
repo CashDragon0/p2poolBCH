@@ -5701,28 +5701,28 @@
     "v": "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff"
    },
    "ipv6_4": {
-    "err": "TypeError",
-    "ok": false
+    "ok": true,
+    "v": "00000000000000000000ffffc0a80101"
    },
    "ipv6_4_rt": {
-    "err": "TypeError",
-    "ok": false
+    "ok": true,
+    "v": "192.168.1.1"
    },
    "ipv6_5": {
-    "err": "AssertionError",
-    "ok": false
+    "ok": true,
+    "v": "00000000000000000000000000000000"
    },
    "ipv6_5_rt": {
-    "err": "AssertionError",
-    "ok": false
+    "ok": true,
+    "v": "0000:0000:0000:0000:0000:0000:0000:0000"
    },
    "ipv6_6": {
-    "err": "AssertionError",
-    "ok": false
+    "ok": true,
+    "v": "20010db8000000000000000000000001"
    },
    "ipv6_6_rt": {
-    "err": "AssertionError",
-    "ok": false
+    "ok": true,
+    "v": "2001:0db8:0000:0000:0000:0000:0000:0001"
    },
    "listint256_0": {
     "ok": true,
@@ -8300,8 +8300,8 @@
     "v": "51"
    },
    "push_10": {
-    "err": "TypeError",
-    "ok": false
+    "ok": true,
+    "v": "4c64ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
    },
    "push_11": {
     "ok": true,
