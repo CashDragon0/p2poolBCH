@@ -20,13 +20,13 @@ WHY
 USAGE
     python3 stratum_probe_server.py [--port 3333] [flags...]
 
-    Defaults match current p2pool production behaviour (flat subscribe,
+    Defaults match current p2pool production behaviour (nested subscribe,
     version-rolling on, mask 1fffe000, keepalive 120s).  Run with no
     flags to reproduce the failing case; flip one flag at a time to
     A/B which combination the miner actually accepts.
 
-    To recreate "STRATUM_NICEHASH_COMPAT=1":
-        --subscribe-form=nested
+    To recreate "STRATUM_FLAT_SUBSCRIBE=1":
+        --subscribe-form=flat
     To recreate "STRATUM_DISABLE_ASICBOOST=1":
         --no-version-rolling
     To recreate "STRATUM_DISABLE_LATENCY_PING=1":
@@ -775,9 +775,9 @@ async def main():
     )
     p.add_argument("--bind", default="0.0.0.0")
     p.add_argument("--port", type=int, default=3333)
-    p.add_argument("--subscribe-form", choices=["flat", "nested"], default="flat",
-                   help="flat = ['mining.notify',id] (current p2pool default); "
-                        "nested = slush/NiceHash form (STRATUM_NICEHASH_COMPAT=1)")
+    p.add_argument("--subscribe-form", choices=["flat", "nested"], default="nested",
+                   help="nested = spec-compliant (current p2pool default); "
+                        "flat = legacy form (STRATUM_FLAT_SUBSCRIBE=1)")
     p.add_argument("--no-version-rolling", action="store_true",
                    help="decline mining.configure version-rolling (=STRATUM_DISABLE_ASICBOOST=1)")
     p.add_argument("--version-mask", default="1fffe000",

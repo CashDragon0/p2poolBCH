@@ -403,13 +403,8 @@ def main(args, net, datadir_path, merged_urls, worker_endpoint):
         # done!
         print('Started successfully!')
         print('Go to http://127.0.0.1:%i/ to view graphs and statistics!' % (worker_endpoint[1],))
-        if args.donation_percentage > 1.1:
+        if args.donation_percentage > 0:
             print('''Donating %.1f%% of work towards P2Pool's development. Thanks for the tip!''' % (args.donation_percentage,))
-        elif args.donation_percentage < .9:
-            print('''Donating %.1f%% of work towards P2Pool's development. Please donate to encourage further development of P2Pool!''' % (args.donation_percentage,))
-        else:
-            print('''Donating %.1f%% of work towards P2Pool's development. Thank you!''' % (args.donation_percentage,))
-            print('You can increase this amount with --give-author argument! (or decrease it, if you must)')
         print()
         
         
@@ -606,9 +601,6 @@ def run():
     parser.add_argument('--irc-announce',
         help='announce any blocks found on irc://irc.freenode.net/#p2pool',
         action='store_true', default=False, dest='irc_announce')
-    parser.add_argument('--no-bugreport',
-        help='disable submitting caught exceptions to the author',
-        action='store_true', default=False, dest='no_bugreport')
     
     p2pool_group = parser.add_argument_group('p2pool interface')
     p2pool_group.add_argument('--p2pool-port', metavar='PORT',
@@ -819,37 +811,6 @@ peers picks the wrong address.''',
         signal.signal(signal.SIGUSR1, sigusr1)
     deferral.RobustLoopingCall(logfile.reopen).start(5)
     
-    class ErrorReporter(object):
-        def __init__(self):
-            self.last_sent = None
-        
-        def emit(self, eventDict):
-            if not eventDict["isError"]:
-                return
-            
-            if self.last_sent is not None and time.time() < self.last_sent + 5:
-                return
-            self.last_sent = time.time()
-            
-            if 'failure' in eventDict:
-                text = ((eventDict.get('why') or 'Unhandled Error')
-                    + '\n' + eventDict['failure'].getTraceback())
-            else:
-                text = " ".join([str(m) for m in eventDict["message"]]) + "\n"
-            
-            # twisted.web.client.getPage was removed in Twisted 21; the
-            # Agent + readBody pair is the documented replacement.
-            # Note: postdata must be bytes, and the URL must be str.
-            from twisted.web.client import Agent, readBody
-            from twisted.web.http_headers import Headers
-            _agent = Agent(reactor)
-            _body = (p2pool.__version__ + ' ' + net.NAME + '\n' + text).encode('utf-8')
-            _req = _agent.request(
-                b'POST', b'http://u.forre.st/p2pool_error.cgi',
-                Headers({b'Content-Type': [b'text/plain']}), _body)
-            _req.addBoth(lambda x: None)
-    if not args.no_bugreport:
-        log.addObserver(ErrorReporter().emit)
     if args.rconsole:
         from rfoo.utils import rconsole
         rconsole.spawn_server()
