@@ -468,8 +468,8 @@ def get_web_root(wb, datadir_path, bitcoind_getinfo_var, stop_event=variable.Eve
                     'ip_connections': {_mask_ip(ip): count for ip, count in ip_connections.items()},
                     'ip_workers': ip_workers,
                     'threat_thresholds': {
-                        'connection_worker_elevated': 4.0,
-                        'connection_worker_warning': 6.0,
+                        'connection_worker_elevated': 20.0,
+                        'connection_worker_warning': 40.0,
                     },
                 },
                 'workers': formatted_workers,
