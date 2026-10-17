@@ -19,6 +19,15 @@ original PyPy2/Twisted 18 codebase.
 Install the dependencies (pinned in `requirements.txt` — `Twisted>=21` is the
 floor; the port is tested against 24.3.0):
 
+On Debian/Ubuntu, install the packaged versions directly (no pip needed —
+Debian 13 ships Twisted 24.11.0 and pyOpenSSL 25.0.0, both satisfying the pins):
+
+```bash
+sudo apt install python3-twisted python3-openssl python3-service-identity
+```
+
+Or with pip:
+
 ```bash
 python3 -m pip install -r requirements.txt
 ```
@@ -30,14 +39,14 @@ python3 -m pip install -r requirements.txt
 Start BCHN first (`server=1` and RPC credentials in `bitcoin.conf`), then:
 
 ```bash
-python3 run_p2pool.py \
-  --net bitcoincash \
-  -a <your_BCH_payout_address> \
+python3 run_p2pool.py --net bitcoincash -a <your_BCH_payout_address>
+```
+
+  *OPTIONAL*
+```bash
   --bitcoind-address 127.0.0.1 \
-  --bitcoind-rpc-port 8332 \
-  BITCOIND_RPCUSER BITCOIND_RPCPASSWORD \
-  --p2pool-port 9349 \
-  -w 9348
+  --bitcoind-rpc-port 8332 BITCOIND_RPCUSER BITCOIND_RPCPASSWORD \
+  --p2pool-port 9349 -w 9348
 ```
 
 The RPC username and password are positional (space-separated, no flag name),
@@ -79,7 +88,7 @@ p2pool communicates with miners via the Stratum protocol:
 
 - **URL:** `stratum+tcp://<node-ip-or-hostname>:9348`
 - **Worker:** your BCH address
-- **Password:** `x`
+- **Password:** `x` (optional)
 
 Mining to Legacy (P2PKH), SegWit/MultiSig (P2SH) and Bech32 addresses are
 supported for the following coins with the specified address prefixes:
@@ -123,6 +132,72 @@ connection is dropped instead; the same reconnect cycle occurs. A 15-minute
 cooldown prevents repeated nudges. The nudge count is visible in the Last
 Submit column tooltip.
 
+### Pages
+
+All pages are served under `/static/` on the same port as stratum:
+
+- `/` or `/static/dashboard.html` — dashboard (landing page; `GET /` redirects here)
+- `/static/miners.html` — per-miner table (hashrate, latency, DOA, payouts)
+- `/static/stratum.html` — stratum stats and connection overview
+- `/static/graphs.html` — historical graphs
+- `/static/index.html` — legacy status page
+
+### API
+
+All API endpoints are unauthenticated JSON on the same port and send
+`Access-Control-Allow-Origin: *`. Parameterized endpoints take the value as a
+path segment, not a query string (e.g. `/miner_stats/<address>`).
+
+| Endpoint | Returns |
+|---|---|
+| `/local_stats` | local hashrates, share counts, warnings |
+| `/global_stats` | pool hashrate, share difficulty, efficiency |
+| `/difficulty` | current share difficulty |
+| `/rate` | current share submission rate |
+| `/uptime` | node uptime (seconds) |
+| `/fee` | pool fee proportion |
+| `/users` | connected worker usernames |
+| `/user_stales` | stale-share rates per user |
+| `/stale_rates` | aggregate stale rates |
+| `/node_info` | node address, ports, best share |
+| `/v36_status` | share-chain protocol status |
+| `/network_difficulty` | network difficulty |
+| `/version_signaling` | client version signalling |
+| `/recent_blocks` | recent blocks found |
+| `/recent_merged_blocks` | recent merged-mined blocks |
+| `/current_payouts` | current block payout outputs |
+| `/current_merged_payouts` | current merged payout outputs |
+| `/best_share` | best share data |
+| `/luck_stats` | per-block luck calculation |
+| `/stratum_stats` | per-worker hashrate, shares, latency |
+| `/stratum_security` | share-rate and burst metrics |
+| `/ban_stats` | ban counters |
+| `/connected_miners` | payout addresses with active workers |
+| `/pings` | per-peer ping times |
+| `/peer_list` | connected p2pool peers |
+| `/peer_addresses` | peer addresses, space-separated |
+| `/peer_txpool_sizes` | remembered tx-pool size per peer |
+| `/peer_versions` | peer sub-versions |
+| `/broadcaster_status` | block broadcaster health and BCH network peers |
+| `/miner_stats/<address>` | per-address stats and worker table |
+| `/miner_payouts/<address>` | per-address payout history |
+| `/merged_miner_payouts/<address>` | per-address merged payouts |
+| `/web/version` | node version string |
+| `/web/currency_info` | ticker symbols and prefixes |
+| `/web/heads` | share-chain head hashes |
+| `/web/tails` | share-chain tail hashes |
+| `/web/verified_heads` | verified head hashes |
+| `/web/verified_tails` | verified tail hashes |
+| `/web/log` | recent log lines |
+| `/web/share/<share_hash>` | single share by hash |
+| `/web/payout_address/<share_hash>` | payout address for a share |
+
+Peer endpoints (`/peer_list`, `/peer_addresses`, `/peer_txpool_sizes`,
+`/pings`, `/peer_versions`, `/broadcaster_status`) expose connected peer IP
+addresses in cleartext. Miner (stratum) IPs are never exposed; `/stratum_stats`
+masks them (`x.x.x.NN`). These endpoints have no authentication — bind the
+worker port to localhost or firewall it if you do not want them reachable.
+
 ---
 
 ## Running the tests
@@ -131,15 +206,9 @@ Submit column tooltip.
 python3 -m twisted.trial p2pool.test
 ```
 
-The suite has 141 tests (138 pass, 3 documented skips that fail identically
-under py2). The golden-vector gate compares against a captured py2 reference:
-
 ```bash
 python3 -m p2pool.test.golden_check
 ```
-
-It reports 3 known baseline mismatches (`pack.ipv6_4`, `pack.ipv6_4_rt`,
-`script.push_10`) that are pre-existing.
 
 Or run both through the wrapper, which builds a venv and exits non-zero if
 either check fails:
